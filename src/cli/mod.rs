@@ -10,6 +10,7 @@ mod report;
 mod search;
 mod show;
 mod stats;
+mod tui;
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueHint};
@@ -58,8 +59,10 @@ pub struct SearchArgs {
     /// Only since a date (2026-08-01) or an age (30d).
     #[arg(long)]
     since: Option<String>,
-    #[arg(long, default_value_t = 20)]
-    limit: usize,
+    /// How many results to keep. Defaults to 20 in the list and 200 in the TUI,
+    /// where scrolling is free.
+    #[arg(long)]
+    limit: Option<usize>,
     /// Match loosely from the start, rather than only when nothing matched.
     #[arg(long, conflicts_with = "exact")]
     fuzzy: bool,
@@ -72,7 +75,7 @@ pub struct SearchArgs {
 }
 
 impl SearchArgs {
-    fn into_query(self, harness: Vec<Harness>) -> Result<whence::search::Query> {
+    fn into_query(self, harness: Vec<Harness>, limit: usize) -> Result<whence::search::Query> {
         use whence::search::{self, Fuzzy};
         Ok(search::Query {
             text: self.query.join(" "),
@@ -81,7 +84,7 @@ impl SearchArgs {
             kind: self.kind.as_deref().map(search::parse_kind).transpose()?,
             tool: self.tool,
             since: self.since.as_deref().map(search::parse_since).transpose()?,
-            limit: self.limit,
+            limit: self.limit.unwrap_or(limit),
             fuzzy: match (self.fuzzy, self.exact) {
                 (true, _) => Fuzzy::Always,
                 (_, true) => Fuzzy::Never,
@@ -136,6 +139,11 @@ enum Command {
         #[arg(long)]
         install: bool,
     },
+    /// Browse the corpus: search as you type, read what you find.
+    Tui {
+        #[command(flatten)]
+        args: SearchArgs,
+    },
     /// Read a conversation a search pointed at: `whence show 641a2ec6#2`.
     Show {
         /// Session id prefix, optionally with the turn: `641a2ec6` or `641a2ec6#2`.
@@ -175,6 +183,7 @@ impl Cli {
                 let index = index::for_query(&self, no_refresh)?;
                 search::file_history(&index, path, limit)
             }
+            Command::Tui { ref args } => self.run_tui(args.clone()),
             Command::Completions { shell, install } => completions::run(shell, install),
             Command::Show {
                 ref target,
@@ -186,9 +195,16 @@ impl Cli {
 
     fn run_search(&self, args: SearchArgs) -> Result<()> {
         let no_refresh = args.no_refresh;
-        let query = args.into_query(self.harness.clone())?;
+        let query = args.into_query(self.harness.clone(), 20)?;
         let index = index::for_query(self, no_refresh)?;
         search::search(&index, &query)
+    }
+
+    fn run_tui(&self, args: SearchArgs) -> Result<()> {
+        let no_refresh = args.no_refresh;
+        let query = args.into_query(self.harness.clone(), 200)?;
+        let index = index::for_query(self, no_refresh)?;
+        tui::run(index, query)
     }
 
     /// The roots to read, after `--root` and `--harness` are applied.

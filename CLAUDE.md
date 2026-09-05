@@ -37,6 +37,13 @@ harness adds one.
   offsets have to point into the stored text.
 - `whence show` and `whence inspect` go through `source` directly, not the
   index, so reading a session back never depends on the index being current.
+- `src/tui/` is the browser. `app.rs` is the state machine and never mentions a
+  terminal, so every key is testable; `ui.rs` owns layout, including `wrap` —
+  the function `render`'s docs point at. It measures display width and breaks
+  mid-run, because Chinese has no spaces to break on; it never reflows a code
+  block. The reader loads sessions through `source` using the path the index
+  stored on the hit, so it shows what the index deliberately never keeps —
+  tool calls above all.
 
 ## Format traps
 
@@ -114,6 +121,16 @@ ignored, and a corrupt line must never abort a file.
   edit distance 1; `tantivy` has zero. Do not unify them.
 - Beware when testing search against the real corpus: these transcripts include
   *this* conversation, so a word you just typed will match itself.
+- The TUI is single-threaded on purpose: events are drained before each redraw,
+  so a held-down key costs one search and one transcript read rather than one
+  per repeat. Measured, that is 6–30 ms per keystroke against the real index and
+  11 ms to open the largest transcript in the corpus — do not add a thread
+  before a measurement says one is needed.
+- Reading a `TestBackend` buffer back is not a screenshot: the cell after a wide
+  character is skipped by ratatui's diff, so it holds whatever the last frame
+  left there. Draw into a fresh terminal, and skip the cell after any symbol
+  wider than one column, or CJK assertions fail on garbage a real terminal never
+  shows.
 - Cross-check token math against `jq` before trusting a change to folding logic.
 - `cargo clippy --all-targets` stays clean; `cargo fmt` before committing.
 - Transcripts contain API keys and private code. Any export or sharing feature
@@ -126,9 +143,10 @@ ignored, and a corrupt line must never abort a file.
 ## Status
 
 Done: the `Source` trait and registry, the Claude and Codex adapters, the
-markdown seam, and `whence sources | inspect | stats`.
+markdown seam, the index and searcher (whose schema carries a `harness` field,
+so results say where a hit came from and `--harness` filters work), and
+`whence sources | inspect | stats | index | search | file | show | completions |
+tui`.
 
-Next, ported from the previous single-harness version: `index`, `search`,
-`show`, `file`, `tui`, `mcp`, `insights`, `redact`, `completions`. The index
-schema gains a `harness` field so results say where a hit came from and
-`--harness` filters work.
+Next, ported from the previous single-harness version: `mcp`, `insights`,
+`redact`.

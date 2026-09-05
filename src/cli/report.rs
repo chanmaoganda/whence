@@ -1,8 +1,11 @@
 //! Shared formatting. Every surface prints numbers the same way, so a count in
 //! `stats` and the same count in `inspect` are comparable at a glance.
 
-use chrono::{DateTime, Utc};
 use std::collections::HashMap;
+
+/// Lives in the model so the TUI, which is not part of this binary, prints
+/// timestamps the same way `stats` and `show` do.
+pub use whence::model::when;
 
 pub fn thousands(n: u64) -> String {
     let s = n.to_string();
@@ -21,13 +24,6 @@ pub fn pct(part: usize, whole: usize) -> f64 {
         0.0
     } else {
         part as f64 / whole as f64 * 100.0
-    }
-}
-
-pub fn when(ts: Option<DateTime<Utc>>) -> String {
-    match ts {
-        Some(t) => t.format("%Y-%m-%d %H:%M").to_string(),
-        None => "                ".to_string(),
     }
 }
 

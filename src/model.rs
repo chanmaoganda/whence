@@ -211,6 +211,15 @@ fn is_time_ordered_uuid(id: &str) -> bool {
         && matches!(bytes[14], b'1' | b'6' | b'7')
 }
 
+/// A timestamp the way every surface prints one. `None` is blank rather than
+/// absent, so a column of them stays a column.
+pub fn when(ts: Option<DateTime<Utc>>) -> String {
+    match ts {
+        Some(t) => t.format("%Y-%m-%d %H:%M").to_string(),
+        None => " ".repeat(16),
+    }
+}
+
 /// The first non-blank line, cut to `max` characters.
 pub fn first_line(text: &str, max: usize) -> String {
     let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");

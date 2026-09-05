@@ -182,10 +182,21 @@ impl SearchIndex {
         }
 
         let query_all = BooleanQuery::new(clauses);
-        let top = searcher.search(
-            &query_all,
-            &TopDocs::with_limit(query.limit.max(1)).order_by_score(),
-        )?;
+        let limit = query.limit.max(1);
+        // With no words to rank on, every document scores the same and "the top
+        // by score" is whatever order the segments happened to be in. Recency is
+        // then the only ordering that means anything — and it turns a bare
+        // `--project x --since 7d`, or the TUI's opening screen, into "what was
+        // I doing", which is the question you were asking.
+        let top: Vec<(Score, DocAddress)> = if query.text.trim().is_empty() {
+            let collector =
+                TopDocs::with_limit(limit).order_by_fast_field::<TantivyDate>("ts", Order::Desc);
+            let recent: Vec<(Option<TantivyDate>, DocAddress)> =
+                searcher.search(&query_all, &collector)?;
+            recent.into_iter().map(|(_, addr)| (0.0, addr)).collect()
+        } else {
+            searcher.search(&query_all, &TopDocs::with_limit(limit).order_by_score())?
+        };
 
         let mut snippets = SnippetGenerator::create(&searcher, &query_all, f.body)?;
         snippets.set_max_num_chars(EXCERPT);

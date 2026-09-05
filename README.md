@@ -23,6 +23,7 @@ $ whence "card view"
 $ whence show 1498aa04#5        # read the conversation back
 $ whence file src/app.rs        # which sessions changed this, and why
 $ whence --harness codex ...    # narrow to one agent
+$ whence tui                    # browse it: search as you type, read what you find
 ```
 
 ## Why it is not a `grep` over `~/.claude`
@@ -63,11 +64,19 @@ Latin needs edit distance.
 Tool *results* are deliberately never indexed. They are most of the corpus by
 volume and they are where pasted secrets live.
 
+`whence tui` is the same search with a screen around it: results narrow as you
+type, the pane beside them previews the conversation each one came from, and
+`⏎` opens it. Text is broken to the width it is drawn at, measured in columns
+and split mid-run where the script has no spaces — code blocks are the one thing
+never reflowed, because a rewrapped shell command is no longer one you can run.
+
 ## Status
 
-Working: `sources`, `inspect`, `stats`, `index`, search, `file`, `show`, over
-Claude Code and Codex. 974 sessions read in 0.2s; a cold index of 722 MB takes
-0.4s and a warm refresh 0.13s.
+Working: `sources`, `inspect`, `stats`, `index`, search, `file`, `show`, `tui`,
+`completions`, over Claude Code and Codex. 974 sessions read in 0.2s; a cold
+index of 722 MB takes 0.4s and a warm refresh 0.13s. In the TUI a keystroke
+costs 6–30 ms of search and under 1 ms of drawing, and the largest transcript in
+the corpus (14 MB) opens in 11 ms.
 
-Being ported from the previous single-harness version: the TUI, the MCP server,
-insights, redaction and shell completions.
+Being ported from the previous single-harness version: the MCP server, insights
+and redaction.
