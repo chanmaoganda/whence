@@ -7,6 +7,7 @@
 
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use ratatui::style::Modifier;
 use ratatui::Terminal;
 use unicode_width::UnicodeWidthStr;
 use whence::index::SearchIndex;
@@ -367,6 +368,48 @@ fn the_reader_opens_on_the_turn_the_hit_came_from() {
         "the reader lands on the matching turn:\n{screen}"
     );
     assert!(screen.contains("aaaaaaaa"), "the header names the session");
+}
+
+/// Why *this* conversation came back. A transcript is thousands of lines and
+/// the reason you opened it is one sentence inside it, so the words that
+/// matched are picked out wherever they appear — the results list can only say
+/// that a hit matched, not where.
+#[test]
+fn the_reader_marks_the_words_that_matched() {
+    let (_dir, mut app) = app();
+    type_in(&mut app, "tantivy");
+    press(&mut app, KeyCode::Enter);
+    let _ = screen(&mut app, 100, 24);
+
+    let laid = app
+        .reading
+        .as_ref()
+        .expect("a reader")
+        .laid()
+        .expect("laid");
+    let marked: Vec<String> = laid
+        .lines
+        .iter()
+        .flat_map(|line| &line.spans)
+        .filter(|span| span.style.add_modifier.contains(Modifier::REVERSED))
+        .map(|span| span.content.to_string())
+        .collect();
+
+    assert_eq!(marked, ["tantivy"], "the matched word, and only it");
+}
+
+/// The other half: a query is not what you typed once the analyzer has cut it
+/// up, and a screen that does not say so cannot explain its own results.
+#[test]
+fn the_query_box_shows_the_words_the_input_was_cut_into() {
+    let (_dir, mut app) = app();
+    type_in(&mut app, "重建索引");
+    let screen = screen(&mut app, 100, 24);
+
+    assert!(
+        screen.contains("重建 + 索引"),
+        "one word typed, two looked for:\n{screen}"
+    );
 }
 
 // ---- tool calls ----------------------------------------------------------

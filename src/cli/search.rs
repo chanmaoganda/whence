@@ -8,24 +8,38 @@ use whence::model::{first_line, short_id};
 use whence::search::{Excerpt, Hit, Query, Results};
 
 pub fn search(index: &SearchIndex, query: &Query) -> Result<()> {
-    let Results { hits, relaxed } = index.search(query)?;
+    let Results {
+        hits,
+        relaxed,
+        terms,
+    } = index.search(query)?;
     if hits.is_empty() {
         println!("no matches.");
         return Ok(());
     }
     if relaxed {
-        println!("nothing matched exactly — relaxed to fuzzy matching\n");
+        match whence::search::relaxation(&hits) {
+            Some(pairs) => println!("nothing matched exactly — relaxed: {pairs}\n"),
+            None => println!("nothing matched exactly — relaxed to fuzzy matching\n"),
+        }
     }
     let sessions: HashSet<&str> = hits.iter().map(|h| h.session.as_str()).collect();
     let harnesses: HashSet<&str> = hits.iter().map(|h| h.harness.as_str()).collect();
     let mut names: Vec<&str> = harnesses.into_iter().collect();
     names.sort_unstable();
     println!(
-        "{} matches across {} sessions ({})\n",
+        "{} matches across {} sessions ({})",
         hits.len(),
         sessions.len(),
         names.join(", ")
     );
+    // What was actually looked for. Your input is not the query: the analyzer
+    // cuts `src/model.rs` into three words and a Chinese phrase into however
+    // many jieba decided, and every one of them has to be present.
+    if !terms.is_empty() {
+        println!("{}", dim(&format!("looked for  {}", terms.join(" + "))));
+    }
+    println!();
     for hit in &hits {
         print_hit(hit);
     }
@@ -60,7 +74,18 @@ fn print_hit(hit: &Hit) {
         hit.kind,
         hit_location(hit)
     );
-    println!("  {}\n", indent(&excerpt(&hit.excerpt)));
+    println!("  {}", indent(&excerpt(&hit.excerpt)));
+    // Only when the excerpt does not already say it: a word the query reached
+    // by relaxing, or a match that was in the title and so is nowhere in the
+    // text below.
+    if let Some(why) = hit.why() {
+        println!("  {}", dim(&format!("↳ {why}")));
+    }
+    println!();
+}
+
+fn dim(text: &str) -> String {
+    format!("\u{1b}[2m{text}\u{1b}[0m")
 }
 
 pub fn show_target(hit: &Hit) -> String {

@@ -50,6 +50,10 @@ pub struct App {
 
     pub hits: Vec<Hit>,
     pub relaxed: bool,
+    /// The query as the analyzer cut it. What you typed is in `query`; this is
+    /// what is actually being looked for, and they are not the same thing once
+    /// a path or a Chinese phrase is involved.
+    pub terms: Vec<String>,
     pub error: Option<String>,
     pub list: ListState,
 
@@ -85,6 +89,7 @@ impl App {
             allowed,
             hits: Vec::new(),
             relaxed: false,
+            terms: Vec::new(),
             error: None,
             list: ListState::default(),
             view: View::Search,
@@ -292,7 +297,7 @@ impl App {
         };
         match self.session_of(&hit) {
             Ok(session) => {
-                self.reading = Some(Reading::new(session, hit.turn as usize));
+                self.reading = Some(Reading::new(session, hit.turn as usize, found(&hit)));
                 self.view = View::Read;
                 self.error = None;
             }
@@ -344,6 +349,7 @@ impl App {
             Ok(results) => {
                 self.hits = results.hits;
                 self.relaxed = results.relaxed;
+                self.terms = results.terms;
                 self.error = None;
             }
             Err(err) => {
@@ -351,6 +357,7 @@ impl App {
                 // error, not a crash. Say so and keep taking keys.
                 self.hits.clear();
                 self.relaxed = false;
+                self.terms.clear();
                 self.error = Some(first_sentence(&err.to_string()));
             }
         }
@@ -365,7 +372,9 @@ impl App {
             return;
         };
         match self.session_of(&hit) {
-            Ok(session) => self.preview = Some(Reading::new(session, hit.turn as usize)),
+            Ok(session) => {
+                self.preview = Some(Reading::new(session, hit.turn as usize, found(&hit)))
+            }
             Err(err) => {
                 self.preview = None;
                 self.error = Some(err);
@@ -405,6 +414,10 @@ pub struct Reading {
     pub session: Rc<Session>,
     /// The turn we came in at, as a [`crate::model::Turn::index`].
     pub turn: usize,
+    /// The words the hit matched, picked out wherever they appear in the
+    /// conversation. A transcript is long and the reason you opened it is one
+    /// sentence somewhere inside it.
+    pub words: Vec<String>,
     pub scroll: usize,
     /// Set during a draw; key handling clamps against them.
     pub height: u16,
@@ -434,10 +447,11 @@ pub struct Laid {
 }
 
 impl Reading {
-    pub fn new(session: Rc<Session>, turn: usize) -> Self {
+    pub fn new(session: Rc<Session>, turn: usize, words: Vec<String>) -> Self {
         Reading {
             session,
             turn,
+            words,
             scroll: 0,
             height: 0,
             total: 0,
@@ -455,7 +469,12 @@ impl Reading {
             None => true,
         };
         if stale {
-            self.layout = Some(super::ui::conversation(&self.session, show, width));
+            self.layout = Some(super::ui::conversation(
+                &self.session,
+                show,
+                width,
+                &self.words,
+            ));
         }
         let laid = self.layout.as_ref().expect("just laid out");
         let jump = self
@@ -513,6 +532,12 @@ impl Reading {
         self.turn = turn.index;
         self.goto = Some(turn.index);
     }
+}
+
+/// The words a hit matched, in the spelling the transcript used — which is what
+/// the reader has to look for, not what was typed.
+fn found(hit: &Hit) -> Vec<String> {
+    hit.matched.iter().map(|m| m.word.clone()).collect()
 }
 
 /// Where a turn sits in `session.turns`. Turns carry their own index — one that

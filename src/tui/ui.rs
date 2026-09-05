@@ -118,7 +118,17 @@ fn query_line(frame: &mut Frame, app: &App, area: Rect) {
         // it gets the brightest thing a terminal has.
         Span::styled(app.query.clone(), Style::new().fg(Color::White).bold())
     };
-    frame.render_widget(Line::from(vec![prompt, typed]), inner);
+    // What you typed is not always what is being looked for: `src/model.rs` is
+    // three words and `重构索引` is two, and every one of them has to be
+    // present. Say so where the analyzer did the splitting rather than you.
+    let mut line = vec![prompt, typed];
+    if app.terms.len() > app.query.split_whitespace().count() {
+        line.push(Span::styled(
+            format!("   {}", app.terms.join(" + ")),
+            Style::new().fg(Color::DarkGray),
+        ));
+    }
+    frame.render_widget(Line::from(line), inner);
 
     // The real cursor, so the terminal blinks it where the caret is and a
     // wide character does not push it half a column out.
@@ -200,6 +210,15 @@ fn hit_item(hit: &Hit, width: usize) -> ListItem<'static> {
 
     let mut lines = vec![Line::from(header)];
     lines.extend(excerpt_lines(&hit.excerpt, width.saturating_sub(2)));
+    if let Some(why) = hit.why() {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                format!("↳ {}", first_line(&why, width.saturating_sub(4))),
+                Style::new().fg(Color::Yellow),
+            ),
+        ]));
+    }
     lines.push(Line::default());
     ListItem::new(lines)
 }
@@ -349,19 +368,86 @@ fn body_paragraph(reading: &Reading) -> Paragraph<'static> {
 // ---- turning a session into lines ---------------------------------------
 
 /// A whole conversation, broken to `width`, with the line each turn starts on.
-pub fn conversation(session: &Session, show: Show, width: u16) -> Laid {
+pub fn conversation(session: &Session, show: Show, width: u16, words: &[String]) -> Laid {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut starts = Vec::with_capacity(session.turns.len());
     for turn in &session.turns {
         starts.push(lines.len());
         lines.extend(turn_lines(turn, show, width));
     }
+    mark(&mut lines, words);
     Laid {
         width,
         show,
         lines,
         starts,
     }
+}
+
+/// Pick the matched words out of a laid-out conversation.
+///
+/// A transcript is thousands of lines and the reason you opened this one is a
+/// sentence somewhere inside it. The results list can say *that* a hit matched;
+/// only the conversation can show you where, and scrolling a wall of text
+/// hunting for a word you can no longer see is the thing this tool exists to
+/// stop you doing.
+///
+/// Marking happens after the lines are broken, so a word split across two lines
+/// is marked on both halves rather than not at all.
+fn mark(lines: &mut [Line<'static>], words: &[String]) {
+    if words.is_empty() {
+        return;
+    }
+    for line in lines {
+        if line.spans.is_empty() {
+            continue;
+        }
+        let marked: Vec<Span<'static>> = std::mem::take(&mut line.spans)
+            .into_iter()
+            .flat_map(|span| mark_span(span, words))
+            .collect();
+        line.spans = marked;
+    }
+}
+
+/// One span, cut into marked and unmarked pieces. Reversed video rather than a
+/// colour, so the mark stands out whatever the span was already styled as and
+/// whatever palette the terminal has.
+fn mark_span(span: Span<'static>, words: &[String]) -> Vec<Span<'static>> {
+    let text = span.content.to_string();
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for word in words {
+        let mut from = 0;
+        while let Some(at) = crate::search::find_word(&text, word, from) {
+            ranges.push((at, at + word.len()));
+            from = at + word.len().max(1);
+        }
+    }
+    if ranges.is_empty() {
+        return vec![span];
+    }
+    ranges.sort_unstable();
+
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut at = 0;
+    for (from, to) in ranges {
+        // Two words that overlap in the text are one mark, not two.
+        if from < at {
+            continue;
+        }
+        if from > at {
+            out.push(Span::styled(text[at..from].to_string(), span.style));
+        }
+        out.push(Span::styled(
+            text[from..to].to_string(),
+            span.style.add_modifier(Modifier::REVERSED),
+        ));
+        at = to;
+    }
+    if at < text.len() {
+        out.push(Span::styled(text[at..].to_string(), span.style));
+    }
+    out
 }
 
 /// A run of tool calls longer than this is folded to one line. Two or three
@@ -892,12 +978,13 @@ fn status_line(app: &App) -> Line<'static> {
         ]);
     }
     if app.relaxed {
+        let what = match crate::search::relaxation(&app.hits) {
+            Some(pairs) => format!("nothing matched exactly — relaxed: {pairs}"),
+            None => "nothing matched exactly — relaxed to fuzzy matching".to_string(),
+        };
         return Line::from(vec![
             Span::raw(" "),
-            Span::styled(
-                "nothing matched exactly — relaxed to fuzzy matching",
-                Style::new().fg(Color::Yellow),
-            ),
+            Span::styled(what, Style::new().fg(Color::Yellow)),
         ]);
     }
     keys(&[

@@ -142,6 +142,19 @@ ignored, and a corrupt line must never abort a file.
   edit distance 1; `tantivy` has zero. Do not unify them.
 - Beware when testing search against the real corpus: these transcripts include
   *this* conversation, so a word you just typed will match itself.
+- **A result has to explain itself.** `Results::terms` is the query as the
+  analyzer cut it — `src/model.rs` is three words and all of them are required —
+  and every `Hit` carries the words it actually matched, paired with the words
+  you typed. The two differ exactly when the query was relaxed (`normlize` finds
+  `normalize`), which is the case where an unmarked excerpt is least
+  explicable. `Hit::why` is the one sentence both surfaces print, and
+  `Found::Title` covers the other silent case: a hit that matched only the
+  boosted title, whose excerpt otherwise reads as though it has nothing to do
+  with the query. The reader marks those words through the whole conversation,
+  because the results list can only say *that* something matched. Latin marks
+  land on word boundaries — `rs`, cut from `src/model.rs`, is also inside
+  `first` and `parse` — while CJK stays a substring, since jieba cuts finer than
+  anyone types.
 - Excerpts are located by searching the stored body for the query's own tokens,
   not with tantivy's `SnippetGenerator`, which re-tokenizes every hit it is
   shown: at the TUI's limit of 200 that was 47 ms of jieba per keystroke on a

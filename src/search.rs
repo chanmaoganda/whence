@@ -54,6 +54,10 @@ pub struct Query {
 pub struct Results {
     pub hits: Vec<Hit>,
     pub relaxed: bool,
+    /// The query as the analyzer cut it — the words actually looked for, which
+    /// is not always the words you typed: `src/model.rs` is three of them, and
+    /// a Chinese phrase is however many jieba decided.
+    pub terms: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +75,60 @@ pub struct Hit {
     pub file: Option<String>,
     pub score: Score,
     pub excerpt: Excerpt,
+    /// Each query word that this hit answered, paired with the word actually
+    /// found. Empty when nothing in the text matched — see [`Hit::found_in`].
+    pub matched: Vec<Matched>,
+    /// Which part of the hit the words were found in.
+    pub found_in: Found,
+}
+
+/// One word of the query and the word in the hit that answered it.
+///
+/// The two differ exactly when the query was relaxed: you typed `normlize` and
+/// the transcript says `normalize`, and being told so is the difference between
+/// a result you can trust and one you have to squint at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Matched {
+    /// The query word, as the analyzer cut it.
+    pub token: String,
+    /// The word found in the hit, in the spelling the transcript used.
+    pub word: String,
+}
+
+/// Where the words were found. Only [`Found::Body`] is visible in the excerpt,
+/// so the other two have to be said out loud.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Found {
+    /// In the excerpt below, where the highlights point at them.
+    #[default]
+    Body,
+    /// Only in the conversation title, which is why the excerpt reads as though
+    /// it has nothing to do with the query.
+    Title,
+    /// Nowhere in the text: this came back on the filters alone, or on a field
+    /// the excerpt never shows.
+    Elsewhere,
+}
+
+impl Hit {
+    /// Why this hit came back, when the excerpt does not already show it. `None`
+    /// means the highlighted words in the excerpt are the whole story.
+    pub fn why(&self) -> Option<String> {
+        let words = || -> Vec<&str> { self.matched.iter().map(|m| m.word.as_str()).collect() };
+        match self.found_in {
+            Found::Body => {
+                let relaxed: Vec<String> = self
+                    .matched
+                    .iter()
+                    .filter(|m| !m.token.eq_ignore_ascii_case(&m.word))
+                    .map(|m| format!("{} → {}", m.token, m.word))
+                    .collect();
+                (!relaxed.is_empty()).then(|| format!("matched {}", relaxed.join(", ")))
+            }
+            Found::Title => Some(format!("matched in the title: {}", words().join(", "))),
+            Found::Elsewhere => None,
+        }
+    }
 }
 
 /// A passage of matching text, with the byte ranges worth highlighting. Keeping
@@ -105,37 +163,35 @@ impl SearchIndex {
     /// Free-text search, ranked by relevance.
     pub fn search(&self, query: &Query) -> Result<Results> {
         let searchable = !query.text.trim().is_empty();
+        let terms = self.text_tokens(&query.text)?;
+        let cut = &terms;
+        let results = |hits, relaxed| Results {
+            hits,
+            relaxed,
+            terms: terms.clone(),
+        };
         match query.fuzzy {
-            Fuzzy::Never => Ok(Results {
-                hits: self.run(query, false)?,
-                relaxed: false,
-            }),
-            Fuzzy::Always if searchable => Ok(Results {
-                hits: self.run(query, true)?,
-                relaxed: true,
-            }),
-            Fuzzy::Always => Ok(Results {
-                hits: self.run(query, false)?,
-                relaxed: false,
-            }),
+            Fuzzy::Never => Ok(results(self.run(query, false, cut)?, false)),
+            Fuzzy::Always if searchable => Ok(results(self.run(query, true, cut)?, true)),
+            Fuzzy::Always => Ok(results(self.run(query, false, cut)?, false)),
             Fuzzy::Auto => {
-                let exact = self.run(query, false)?;
+                let exact = self.run(query, false, cut)?;
                 if !exact.is_empty() || !searchable {
-                    return Ok(Results {
-                        hits: exact,
-                        relaxed: false,
-                    });
+                    return Ok(results(exact, false));
                 }
                 // Nothing matched exactly, so the alternative to relaxing is an
                 // empty screen. Only then is the extra recall worth the noise.
-                let hits = self.run(query, true)?;
+                let hits = self.run(query, true, cut)?;
                 let relaxed = !hits.is_empty();
-                Ok(Results { hits, relaxed })
+                Ok(results(hits, relaxed))
             }
         }
     }
 
-    fn run(&self, query: &Query, fuzzy: bool) -> Result<Vec<Hit>> {
+    /// One pass over the index. `tokens` is the query as the analyzer cut it,
+    /// passed in because the two passes of [`Fuzzy::Auto`] share it — and
+    /// cutting a Chinese query is what loads jieba's dictionary.
+    fn run(&self, query: &Query, fuzzy: bool, tokens: &[String]) -> Result<Vec<Hit>> {
         let f = self.fields;
         let reader = self.index.reader()?;
         let searcher = reader.searcher();
@@ -143,7 +199,7 @@ impl SearchIndex {
         let text: Box<dyn TantivyQuery> = if query.text.trim().is_empty() {
             Box::new(AllQuery)
         } else if fuzzy {
-            self.fuzzy_query(&query.text)?
+            self.fuzzy_query(&query.text, tokens)?
         } else {
             let mut parser = QueryParser::for_index(&self.index, vec![f.body, f.title]);
             // A hit in the conversation title is a strong signal that the whole
@@ -202,13 +258,25 @@ impl SearchIndex {
         // that was 47 ms of jieba per keystroke on a Chinese query against 4 ms
         // here, and it could not highlight a regex or fuzzy match at all,
         // because those report no terms.
-        let tokens = self.text_tokens(&query.text)?;
-
         top.into_iter()
             .map(|(score, addr)| {
                 let doc: TantivyDocument = searcher.doc(addr)?;
                 let body = stored_text(&doc, f.body).unwrap_or_default();
-                Ok(self.hit(&doc, score, locate(&body, &tokens)))
+                let (excerpt, matched) = locate(&body, tokens, fuzzy);
+                // A hit whose words are nowhere in the body matched on the
+                // title, which is boosted and searched alongside it. Saying so
+                // is the difference between an excerpt that looks wrong and one
+                // that is merely not where the match was.
+                let (matched, found_in) = if !matched.is_empty() {
+                    (matched, Found::Body)
+                } else {
+                    let title = stored_text(&doc, f.title).unwrap_or_default();
+                    match locate(&title, tokens, fuzzy).1 {
+                        found if !found.is_empty() => (found, Found::Title),
+                        _ => (Vec::new(), Found::Elsewhere),
+                    }
+                };
+                Ok(self.hit(&doc, score, excerpt, matched, found_in))
             })
             .collect()
     }
@@ -237,12 +305,21 @@ impl SearchIndex {
                     text: opening(&stored_text(&doc, f.body).unwrap_or_default(), EXCERPT),
                     highlights: Vec::new(),
                 };
-                Ok(self.hit(&doc, 0.0, excerpt))
+                // What matched is the path, and the path is printed above the
+                // excerpt — there is nothing to explain.
+                Ok(self.hit(&doc, 0.0, excerpt, Vec::new(), Found::Elsewhere))
             })
             .collect()
     }
 
-    fn hit(&self, doc: &TantivyDocument, score: Score, excerpt: Excerpt) -> Hit {
+    fn hit(
+        &self,
+        doc: &TantivyDocument,
+        score: Score,
+        excerpt: Excerpt,
+        matched: Vec<Matched>,
+        found_in: Found,
+    ) -> Hit {
         let f = self.fields;
         Hit {
             harness: stored_text(doc, f.harness).unwrap_or_default(),
@@ -259,6 +336,8 @@ impl SearchIndex {
             file: stored_text(doc, f.file),
             score,
             excerpt,
+            matched,
+            found_in,
         }
     }
 
@@ -279,10 +358,10 @@ impl SearchIndex {
     /// reverse holds for Latin script: a typo has no substring in common, and
     /// `tantivy` has *zero* neighbours at distance 1, so the correction is
     /// unambiguous.
-    fn fuzzy_query(&self, text: &str) -> Result<Box<dyn TantivyQuery>> {
+    fn fuzzy_query(&self, text: &str, tokens: &[String]) -> Result<Box<dyn TantivyQuery>> {
         let mut clauses: Vec<(Occur, Box<dyn TantivyQuery>)> = Vec::new();
-        for token in self.text_tokens(text)? {
-            clauses.push((Occur::Must, self.token_query(&token)?));
+        for token in tokens {
+            clauses.push((Occur::Must, self.token_query(token)?));
         }
         if clauses.is_empty() {
             bail!("{text:?} has nothing to match on");
@@ -359,6 +438,24 @@ impl SearchIndex {
     }
 }
 
+/// The words a relaxed pass actually reached, as `typed → found` pairs.
+///
+/// `None` when nothing was reached by relaxing — then the honest thing to say
+/// is only that the query was relaxed, because the words are the ones you typed.
+pub fn relaxation(hits: &[Hit]) -> Option<String> {
+    let mut pairs: Vec<String> = Vec::new();
+    for matched in hits.iter().flat_map(|hit| &hit.matched) {
+        if matched.token.eq_ignore_ascii_case(&matched.word) {
+            continue;
+        }
+        let pair = format!("{} → {}", matched.token, matched.word);
+        if !pairs.contains(&pair) {
+            pairs.push(pair);
+        }
+    }
+    (!pairs.is_empty()).then(|| pairs.join(", "))
+}
+
 fn exact(field: tantivy::schema::Field, value: &str) -> Box<dyn TantivyQuery> {
     Box::new(TermQuery::new(
         Term::from_field_text(field, value),
@@ -375,20 +472,39 @@ fn since_query(ts: tantivy::schema::Field, since: DateTime<Utc>) -> Box<dyn Tant
 /// Characters of context to show around a match.
 const EXCERPT: usize = 220;
 
-/// A window of `body` around the first token that literally occurs in it, with
-/// every occurrence inside the window highlighted.
+/// A window of `body` around the first query word found in it, every occurrence
+/// inside the window highlighted, and which words those were.
 ///
-/// Every token of an exact query is in the body verbatim, because the analyzer
-/// cut it out of text like this one. A token matched by edit distance is not
-/// (`normlize` never appears; `normalize` does), so nothing is found and the
-/// opening words are the honest fallback. Substring matches — which is every
-/// CJK token — always locate.
-fn locate(body: &str, tokens: &[String]) -> Excerpt {
-    let Some(at) = tokens.iter().filter_map(|t| find_ci(body, t, 0)).min() else {
-        return Excerpt {
-            text: opening(body, EXCERPT),
-            highlights: Vec::new(),
-        };
+/// Every word of an exact query is in the body verbatim, because the analyzer
+/// cut it out of text like this one. A relaxed query's word is not — `normlize`
+/// never appears, `normalize` does — so `relaxed` says to look for whatever the
+/// relaxed query would have accepted, and report the spelling actually found.
+/// Without that, the one search that most needs explaining is the one that
+/// comes back with nothing highlighted at all.
+fn locate(body: &str, tokens: &[String], relaxed: bool) -> (Excerpt, Vec<Matched>) {
+    let mut found: Vec<(usize, Matched)> = tokens
+        .iter()
+        .filter_map(|token| {
+            let (at, word) = first_match(body, token, relaxed)?;
+            Some((
+                at,
+                Matched {
+                    token: token.clone(),
+                    word,
+                },
+            ))
+        })
+        .collect();
+    found.sort_by_key(|(at, _)| *at);
+
+    let Some(&(at, _)) = found.first() else {
+        return (
+            Excerpt {
+                text: opening(body, EXCERPT),
+                highlights: Vec::new(),
+            },
+            Vec::new(),
+        );
     };
 
     // Back off a little so the match is not flush against the left edge, and
@@ -398,18 +514,129 @@ fn locate(body: &str, tokens: &[String]) -> Excerpt {
     let window = body[start..end].replace('\n', " ");
 
     let mut highlights: Vec<Range<usize>> = Vec::new();
-    for token in tokens {
+    for (_, matched) in &found {
         let mut from = 0;
-        while let Some(hit) = find_ci(&window, token, from) {
-            highlights.push(hit..hit + token.len());
-            from = hit + token.len().max(1);
+        while let Some(hit) = find_word(&window, &matched.word, from) {
+            highlights.push(hit..hit + matched.word.len());
+            from = hit + matched.word.len().max(1);
         }
     }
     highlights.sort_by_key(|r| r.start);
-    Excerpt {
-        text: window,
-        highlights,
+
+    let mut matched: Vec<Matched> = Vec::new();
+    for (_, one) in found {
+        if !matched.contains(&one) {
+            matched.push(one);
+        }
     }
+    (
+        Excerpt {
+            text: window,
+            highlights,
+        },
+        matched,
+    )
+}
+
+/// Where a query word occurs in `body`, and how it is spelled there.
+///
+/// Literal first, because that is what an exact query means. A relaxed query
+/// then gets the same treatment its *query* got, since the two must agree about
+/// what counts as a match: CJK is substring matching, which the literal pass
+/// has already covered, and Latin script is a prefix within one edit — so
+/// `tantiv` and `tantivvy` both point at the `tantivy` in the text.
+fn first_match(body: &str, token: &str, relaxed: bool) -> Option<(usize, String)> {
+    if let Some(at) = find_word(body, token, 0) {
+        return Some((at, body[at..at + token.len()].to_string()));
+    }
+    if !relaxed || token.chars().any(is_cjk) {
+        return None;
+    }
+    let allowed = usize::from(token.chars().count() >= 4);
+    words(body).find_map(|(at, word)| {
+        (prefix_distance(token, word) <= allowed).then(|| (at, word.to_string()))
+    })
+}
+
+/// Runs of Latin-ish word characters, the way the analyzer cut them. CJK is
+/// excluded because it is never what a Latin token is looking for, and letting
+/// a whole Chinese sentence in as one "word" makes the edit distance below
+/// expensive for no possible gain.
+fn words(body: &str) -> impl Iterator<Item = (usize, &str)> {
+    let mut start: Option<usize> = None;
+    let mut chars = body
+        .char_indices()
+        .chain(std::iter::once((body.len(), ' ')));
+    std::iter::from_fn(move || {
+        for (at, ch) in chars.by_ref() {
+            if ch.is_alphanumeric() && !is_cjk(ch) {
+                start.get_or_insert(at);
+            } else if let Some(from) = start.take() {
+                return Some((from, &body[from..at]));
+            }
+        }
+        None
+    })
+}
+
+/// How many edits turn `token` into some prefix of `word` — the distance a
+/// prefix fuzzy query measures, so a longer word costs nothing extra.
+///
+/// Only the first `token.len() + 1` characters of `word` can matter, so the
+/// table stays small however long the word is.
+fn prefix_distance(token: &str, word: &str) -> usize {
+    let a: Vec<char> = token.chars().flat_map(char::to_lowercase).collect();
+    let b: Vec<char> = word
+        .chars()
+        .flat_map(char::to_lowercase)
+        .take(a.len() + 1)
+        .collect();
+    if b.len() + 1 < a.len() {
+        return usize::MAX;
+    }
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, x) in a.iter().enumerate() {
+        let mut next = vec![i + 1; b.len() + 1];
+        for (j, y) in b.iter().enumerate() {
+            next[j + 1] = if x == y {
+                row[j]
+            } else {
+                1 + row[j].min(row[j + 1]).min(next[j])
+            };
+        }
+        row = next;
+    }
+    // The word is free to carry on past the token, so any column of the last
+    // row is an answer.
+    row.into_iter().min().unwrap_or(usize::MAX)
+}
+
+/// Where a query word occurs in `haystack`, as the analyzer would count it.
+///
+/// Latin script has to land on a word boundary: the query `src/model.rs` cuts
+/// to `rs`, and marking the `rs` inside `first` and `parse` turns a page of a
+/// conversation into noise. CJK has no boundaries to land on — jieba cuts finer
+/// than you type — so there it stays a substring, which is the same rule the
+/// relaxed pass matches CJK with.
+pub(crate) fn find_word(haystack: &str, needle: &str, from: usize) -> Option<usize> {
+    if needle.chars().any(is_cjk) {
+        return find_ci(haystack, needle, from);
+    }
+    let mut at = from;
+    while let Some(found) = find_ci(haystack, needle, at) {
+        let before = haystack[..found].chars().next_back();
+        let after = haystack[found + needle.len()..].chars().next();
+        if [before, after].into_iter().flatten().all(is_boundary) {
+            return Some(found);
+        }
+        at = found + needle.len().max(1);
+    }
+    None
+}
+
+/// Anything the analyzer would have cut a Latin word at.
+fn is_boundary(c: char) -> bool {
+    !c.is_alphanumeric() || is_cjk(c)
 }
 
 /// Case-insensitive substring search that reports a byte offset into

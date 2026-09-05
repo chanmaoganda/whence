@@ -8,7 +8,7 @@
 use tantivy::tokenizer::TokenStream;
 use whence::index::SearchIndex;
 use whence::model::Harness;
-use whence::search::{Fuzzy, Query};
+use whence::search::{Found, Fuzzy, Query};
 use whence::source::{Root, Transcript};
 
 const SESSION: &str = "bbbbbbbb-2222-4222-8222-222222222222";
@@ -16,6 +16,12 @@ const SESSION: &str = "bbbbbbbb-2222-4222-8222-222222222222";
 /// One indexed transcript, one prompt per line given, kept alive by the
 /// returned directory.
 fn corpus(prompts: &[&str]) -> (tempfile::TempDir, SearchIndex) {
+    titled(None, prompts)
+}
+
+/// The same, with the auto-generated conversation title a harness would have
+/// written — which is searched alongside the body, and boosted.
+fn titled(title: Option<&str>, prompts: &[&str]) -> (tempfile::TempDir, SearchIndex) {
     let dir = tempfile::tempdir().expect("tempdir");
     let project = dir.path().join("projects").join("-code-demo");
     std::fs::create_dir_all(&project).expect("mkdir");
@@ -33,6 +39,13 @@ fn corpus(prompts: &[&str]) -> (tempfile::TempDir, SearchIndex) {
             .replace('\n', "")
         })
         .collect();
+    let mut lines = lines;
+    if let Some(title) = title {
+        lines.push(format!(
+            r#"{{"type":"ai-title","sessionId":"{SESSION}","aiTitle":{}}}"#,
+            serde_json::to_string(title).expect("json")
+        ));
+    }
     let file = project.join(format!("{SESSION}.jsonl"));
     std::fs::write(&file, lines.join("\n")).expect("write");
 
@@ -153,4 +166,103 @@ fn an_index_from_an_older_format_is_rebuilt() {
         SearchIndex::open(&path).is_ok(),
         "and what replaced it is this format"
     );
+}
+
+/// The first half of "why did this come back": what is actually being searched
+/// for. Your input is not the query — the analyzer cuts a path into three words
+/// and every one of them has to be present.
+#[test]
+fn the_query_is_reported_as_the_words_it_was_cut_into() {
+    let (_dir, index) = corpus(&["look at src/model.rs again"]);
+
+    let results = index.search(&exact("src/model.rs")).expect("search");
+    assert_eq!(results.terms, ["src", "model", "rs"]);
+    assert_eq!(results.hits.len(), 1);
+}
+
+/// A relaxed pass is the case that most needs explaining: nothing you typed is
+/// in the text, so an unhighlighted excerpt leaves you guessing. The hit has to
+/// name the word it actually found.
+#[test]
+fn a_relaxed_hit_names_the_word_it_actually_found() {
+    let (_dir, index) = corpus(&["normalize the transcript first"]);
+
+    let results = index
+        .search(&Query {
+            text: "normlize".to_string(),
+            limit: 20,
+            ..Query::default()
+        })
+        .expect("search");
+    assert!(results.relaxed, "the typo matches nothing exactly");
+
+    let hit = results.hits.first().expect("a hit");
+    assert_eq!(hit.found_in, Found::Body);
+    assert_eq!(hit.matched.len(), 1);
+    assert_eq!(hit.matched[0].token, "normlize");
+    assert_eq!(hit.matched[0].word, "normalize");
+    assert_eq!(hit.why().as_deref(), Some("matched normlize → normalize"));
+
+    // And the excerpt points at it, rather than falling back to the opening
+    // words with nothing marked at all.
+    let marked: Vec<&str> = hit
+        .excerpt
+        .highlights
+        .iter()
+        .map(|range| &hit.excerpt.text[range.clone()])
+        .collect();
+    assert_eq!(marked, ["normalize"]);
+    assert_eq!(
+        whence::search::relaxation(&results.hits).as_deref(),
+        Some("normlize → normalize")
+    );
+}
+
+/// The other way an excerpt can look unrelated: the match was in the title,
+/// which is searched and boosted but is not the text underneath.
+#[test]
+fn a_match_in_the_title_alone_says_so() {
+    let (_dir, index) = titled(
+        Some("Polonius borrow checker"),
+        &["how do i fix this lifetime error"],
+    );
+
+    let hit = index
+        .search(&exact("polonius"))
+        .expect("search")
+        .hits
+        .into_iter()
+        .next()
+        .expect("a hit");
+
+    assert_eq!(hit.found_in, Found::Title);
+    assert_eq!(
+        hit.why().as_deref(),
+        Some("matched in the title: Polonius"),
+        "an excerpt with nothing marked in it has to explain itself"
+    );
+}
+
+/// `src/model.rs` cuts to three words, one of which is `rs` — and `rs` is
+/// inside `first` and `parse` too. A mark that lands there is noise, and in the
+/// reader, where the whole conversation is marked, it is a lot of noise.
+#[test]
+fn a_latin_word_is_marked_only_where_it_is_a_word() {
+    let (_dir, index) = corpus(&["the first parse of src/model.rs"]);
+
+    let hit = index
+        .search(&exact("src/model.rs"))
+        .expect("search")
+        .hits
+        .into_iter()
+        .next()
+        .expect("a hit");
+    let marked: Vec<&str> = hit
+        .excerpt
+        .highlights
+        .iter()
+        .map(|range| &hit.excerpt.text[range.clone()])
+        .collect();
+
+    assert_eq!(marked, ["src", "model", "rs"]);
 }
