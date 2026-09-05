@@ -9,10 +9,9 @@
 //! index: you rarely remember which agent you were using when you saw the thing
 //! you are now looking for.
 
-use crate::index::{
-    stored_text, SearchIndex, KIND_EDIT, KIND_PROMPT, KIND_REPLY, KIND_THINK, TOK_PATH, TOK_TEXT,
-};
+use crate::index::{stored_text, SearchIndex, KIND_EDIT, KIND_PROMPT, KIND_REPLY, KIND_THINK};
 use crate::model::Harness;
+use crate::tokenize::{is_cjk, TOK_PATH, TOK_TEXT};
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, TimeZone, Utc};
 use std::ops::Range;
@@ -22,7 +21,6 @@ use tantivy::query::{
     RangeQuery, RegexQuery, TermQuery,
 };
 use tantivy::schema::{IndexRecordOption, Value};
-use tantivy::snippet::SnippetGenerator;
 use tantivy::{DateTime as TantivyDate, DocAddress, Order, Score, TantivyDocument, Term};
 
 /// When to fall back from exact matching to fuzzy matching.
@@ -198,30 +196,19 @@ impl SearchIndex {
             searcher.search(&query_all, &TopDocs::with_limit(limit).order_by_score())?
         };
 
-        let mut snippets = SnippetGenerator::create(&searcher, &query_all, f.body)?;
-        snippets.set_max_num_chars(EXCERPT);
-        // A regex or fuzzy query reports no terms, so tantivy's snippet
-        // generator has nothing to highlight and would hand back the opening
-        // words of the document — which never shows you why it matched. Find
-        // the token ourselves instead.
-        let tokens = if fuzzy {
-            self.fuzzy_tokens(&query.text)?
-        } else {
-            Vec::new()
-        };
+        // Excerpts are found by looking for the query's own tokens in the
+        // stored body. tantivy's `SnippetGenerator` would pick a better window,
+        // but it re-tokenizes every hit it is shown: at the TUI's limit of 200
+        // that was 47 ms of jieba per keystroke on a Chinese query against 4 ms
+        // here, and it could not highlight a regex or fuzzy match at all,
+        // because those report no terms.
+        let tokens = self.text_tokens(&query.text)?;
 
         top.into_iter()
             .map(|(score, addr)| {
                 let doc: TantivyDocument = searcher.doc(addr)?;
                 let body = stored_text(&doc, f.body).unwrap_or_default();
-                let excerpt = match snippets.snippet_from_doc(&doc) {
-                    s if !s.is_empty() => Excerpt {
-                        text: s.fragment().to_string(),
-                        highlights: s.highlighted().to_vec(),
-                    },
-                    _ => locate(&body, &tokens),
-                };
-                Ok(self.hit(&doc, score, excerpt))
+                Ok(self.hit(&doc, score, locate(&body, &tokens)))
             })
             .collect()
     }
@@ -294,7 +281,7 @@ impl SearchIndex {
     /// unambiguous.
     fn fuzzy_query(&self, text: &str) -> Result<Box<dyn TantivyQuery>> {
         let mut clauses: Vec<(Occur, Box<dyn TantivyQuery>)> = Vec::new();
-        for token in self.fuzzy_tokens(text)? {
+        for token in self.text_tokens(text)? {
             clauses.push((Occur::Must, self.token_query(&token)?));
         }
         if clauses.is_empty() {
@@ -306,7 +293,11 @@ impl SearchIndex {
     /// The query cut the way the index was cut, deduplicated: jieba's search
     /// mode emits overlapping tokens, and requiring one twice only narrows the
     /// result for no gain.
-    fn fuzzy_tokens(&self, text: &str) -> Result<Vec<String>> {
+    ///
+    /// These are both what a relaxed pass matches on and what an excerpt
+    /// highlights, which is the same list for the same reason: they are the
+    /// words the index would have looked for.
+    fn text_tokens(&self, text: &str) -> Result<Vec<String>> {
         let mut analyzer = self
             .index
             .tokenizers()
@@ -387,7 +378,8 @@ const EXCERPT: usize = 220;
 /// A window of `body` around the first token that literally occurs in it, with
 /// every occurrence inside the window highlighted.
 ///
-/// A token that was matched by edit distance is not in the body verbatim
+/// Every token of an exact query is in the body verbatim, because the analyzer
+/// cut it out of text like this one. A token matched by edit distance is not
 /// (`normlize` never appears; `normalize` does), so nothing is found and the
 /// opening words are the honest fallback. Substring matches — which is every
 /// CJK token — always locate.
@@ -444,12 +436,6 @@ fn ceil_char_boundary(s: &str, mut i: usize) -> usize {
         i += 1;
     }
     i
-}
-
-/// CJK, roughly: everything from the CJK radicals block upward. Precision here
-/// only decides which flavour of fuzziness a token gets, so this is enough.
-fn is_cjk(c: char) -> bool {
-    matches!(c as u32, 0x2E80..=0x9FFF | 0xF900..=0xFAFF | 0x20000..=0x3FFFF)
 }
 
 fn escape_regex(token: &str) -> String {

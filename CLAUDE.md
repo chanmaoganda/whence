@@ -11,7 +11,7 @@ session changed this file, and why.
 ## Architecture
 
 ```
-source/{claude,codex} ──▶ model ──┬──▶ index + search (tantivy, jieba)
+source/{claude,codex} ──▶ model ──┬──▶ tokenize ──▶ index + search (tantivy)
  per-harness parsing              ├──▶ insights (corpus aggregates)
                                   ├──▶ render ──▶ CLI + ratatui TUI
                                   ├──▶ MCP server (redacted)
@@ -38,6 +38,19 @@ harness adds one.
   never characters, so a line stays free to break inside a bold run; tables are
   the one construct that gives up its inline markup, because a clipped column
   cannot carry emphasis ranges through the clip.
+- `src/tokenize.rs` is the analyzer both the index and every query go through,
+  and the only place jieba is named. It cuts text into runs of CJK and runs of
+  everything else, and **only the CJK runs reach jieba** — the dictionary is
+  ~100 ms to load, once per process, and tokenizing the query is what triggers
+  it, so a query with no Chinese in it used to spend 100 ms of its 110 ms
+  building a dictionary it never consulted. The split is a property of the text,
+  never of the caller, which is what keeps a document and a query cut the same
+  way; a term the two spell differently can never be found. Punctuation and
+  whitespace are dropped — 58.7% of what jieba emitted over the corpus, 29% of
+  the searchable index, and `" "` as a term meant every multi-word query
+  intersected a posting list holding every document and highlighted every space
+  in the excerpt. Positions stay character offsets, because jieba's search mode
+  overlaps a compound word with its pieces and only a real offset can say so.
 - `whence show` and `whence inspect` go through `source` directly, not the
   index, so reading a session back never depends on the index being current.
 - `src/tui/` is the browser. `app.rs` is the state machine and never mentions a
@@ -129,9 +142,19 @@ ignored, and a corrupt line must never abort a file.
   edit distance 1; `tantivy` has zero. Do not unify them.
 - Beware when testing search against the real corpus: these transcripts include
   *this* conversation, so a word you just typed will match itself.
+- Excerpts are located by searching the stored body for the query's own tokens,
+  not with tantivy's `SnippetGenerator`, which re-tokenizes every hit it is
+  shown: at the TUI's limit of 200 that was 47 ms of jieba per keystroke on a
+  Chinese query against 4 ms. It also could never highlight a fuzzy or regex
+  match, which report no terms — so this is one path where there were two.
+- `INDEX_FORMAT` covers the analyzer, not just the schema. Changing how text is
+  cut changes what the terms *are*, and an index full of the old ones answers
+  new queries with silence. Bump it and the stale index is rebuilt (0.4 s over
+  the whole corpus), never queried.
 - The TUI is single-threaded on purpose: events are drained before each redraw,
   so a held-down key costs one search and one transcript read rather than one
-  per repeat. Measured, that is 6–30 ms per keystroke against the real index and
+  per repeat. Measured, that is 1–4 ms per keystroke against the real index
+  (it was 6–47 ms before excerpts stopped going through `SnippetGenerator`) and
   11 ms to open the largest transcript in the corpus — do not add a thread
   before a measurement says one is needed.
 - Reading a `TestBackend` buffer back is not a screenshot: the cell after a wide

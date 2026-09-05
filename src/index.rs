@@ -6,9 +6,10 @@
 //! **The tokenizer must handle CJK.** These transcripts are largely Chinese, and
 //! tantivy's default tokenizer splits on whitespace and punctuation — which
 //! turns a whole Chinese sentence into one unsearchable token. Text fields go
-//! through `jieba`; path-shaped fields go through a simple splitter so
-//! `src/normalize.rs` and `/code/rust/whence/src/model.rs` match the same
-//! documents.
+//! through [`crate::tokenize`], which reaches for jieba's dictionary only where
+//! the text is actually Chinese; path-shaped fields go through a simple
+//! splitter so `src/normalize.rs` and `/code/rust/whence/src/model.rs` match
+//! the same documents.
 //!
 //! **The harness is a field, not a separate index.** Every document records
 //! which agent it came from, so one index answers "where did I see this" across
@@ -24,6 +25,7 @@
 
 use crate::model::{Session, Turn};
 use crate::source::{self, Root, Transcript};
+use crate::tokenize::{self, TOK_PATH, TOK_TEXT};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rayon::prelude::*;
@@ -36,16 +38,12 @@ use tantivy::schema::{
     DateOptions, DateTimePrecision, Field, IndexRecordOption, Schema, TextFieldIndexing,
     TextOptions, Value, INDEXED, STORED, STRING,
 };
-use tantivy::tokenizer::{LowerCaser, RemoveLongFilter, SimpleTokenizer, TextAnalyzer};
 use tantivy::{DateTime as TantivyDate, Index, TantivyDocument, Term};
 
-/// Bumped whenever the schema changes; a stale index is rebuilt, not rejected.
-const INDEX_FORMAT: u32 = 1;
-
-/// jieba, for prose. Named in `meta.json`, so it must be re-registered on open.
-pub const TOK_TEXT: &str = "jieba";
-/// Simple splitting on non-alphanumerics, for paths, projects and tool names.
-pub const TOK_PATH: &str = "path";
+/// Bumped whenever the schema or the analyzer changes; a stale index is
+/// rebuilt, not rejected. `2` is the script-aware tokenizer, which cuts Latin
+/// script differently from the jieba-everywhere `1` and keeps no punctuation.
+const INDEX_FORMAT: u32 = 2;
 
 /// Cap on indexed text per document. Long tool-shaped pastes add index weight
 /// without adding anything you would search for.
@@ -418,20 +416,8 @@ fn tokenized(tokenizer: &str) -> TextOptions {
 }
 
 pub fn register_tokenizers(index: &Index) {
-    index.tokenizers().register(
-        TOK_TEXT,
-        TextAnalyzer::builder(tantivy_jieba::JiebaTokenizer::new())
-            .filter(RemoveLongFilter::limit(64))
-            .filter(LowerCaser)
-            .build(),
-    );
-    index.tokenizers().register(
-        TOK_PATH,
-        TextAnalyzer::builder(SimpleTokenizer::default())
-            .filter(RemoveLongFilter::limit(64))
-            .filter(LowerCaser)
-            .build(),
-    );
+    index.tokenizers().register(TOK_TEXT, tokenize::text());
+    index.tokenizers().register(TOK_PATH, tokenize::path());
 }
 
 /// One session becomes several documents: what you asked, what came back, what

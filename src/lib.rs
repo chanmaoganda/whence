@@ -22,4 +22,5 @@ pub mod model;
 pub mod render;
 pub mod search;
 pub mod source;
+pub mod tokenize;
 pub mod tui;
