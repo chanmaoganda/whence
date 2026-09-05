@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.88"
 description = "Local search engine and time machine for your coding agents' transcripts"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/ethan/whence"
+repository = "https://github.com/chanmaoganda/whence"
 keywords = ["claude-code", "codex", "search", "transcript", "cli"]
 categories = ["command-line-utilities"]
 

@@ -11,14 +11,14 @@ on your own machine. No telemetry, no uploads.
 ```console
 $ whence sources
 harness    files  root
-claude       965  /home/ethan/.claude/projects
-codex          9  /home/ethan/.codex/sessions
+claude       965  ~/.claude/projects
+codex          9  ~/.codex/sessions
 
 $ whence "card view"
 6 matches across 3 sessions (claude, codex)
 
-2026-07-11 02:04  codex   prompt  /code/stock/rtrade  1498aa04#5
-  half page of blank, and card view cannot be scrolled, and not grid view correctly
+2026-07-11 02:04  codex   prompt  /code/acme/dashboard  1498aa04#5
+  the card view cannot be scrolled, and the grid view is not laid out right
 
 $ whence show 1498aa04#5        # read the conversation back
 $ whence file src/app.rs        # which sessions changed this, and why
@@ -88,3 +88,8 @@ the corpus (14 MB) opens in 11 ms.
 
 Being ported from the previous single-harness version: the MCP server, insights
 and redaction.
+
+## License
+
+MIT or Apache-2.0, at your option. See [LICENSE-MIT](LICENSE-MIT) and
+[LICENSE-APACHE](LICENSE-APACHE).
