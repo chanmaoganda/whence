@@ -14,7 +14,7 @@ use whence::model::Harness;
 use whence::render::renderer;
 use whence::search::Query;
 use whence::source::{Root, Transcript};
-use whence::tui::{ui, App, View};
+use whence::tui::{ui, App, Show, View};
 
 // ---- line breaking -------------------------------------------------------
 
@@ -84,6 +84,44 @@ fn code_blocks_are_never_reflowed() {
         code[0]
     );
     assert_eq!(code[1], "│ ls");
+}
+
+/// Markdown is read, not shown. A reply full of `**` and `|` is what most of
+/// this corpus looks like, and the pipes are not the part you came to read.
+#[test]
+fn markdown_is_rendered_rather_than_printed() {
+    let lines = lines_of(
+        "## What changed\n\nThe **folding** is in `ui.rs`.\n\n- one\n- two\n",
+        40,
+    );
+    let screen = lines.join("\n");
+    assert!(screen.contains("# What changed"), "{screen}");
+    assert!(
+        !screen.contains("**") && screen.contains("The folding is in ui.rs."),
+        "markup is emphasis, not characters:\n{screen}"
+    );
+    assert!(screen.contains("• one"), "{screen}");
+}
+
+/// A table shown as its pipes is the ugliest thing in the reader, and a table
+/// wider than the pane still has to stay a table.
+#[test]
+fn a_table_is_laid_out_in_columns() {
+    let source = "| harness | sessions |\n| --- | --- |\n| claude | 812 |\n";
+    let lines = lines_of(source, 30);
+    assert!(lines[0].starts_with("harness │ sessions"), "{lines:?}");
+    assert!(lines[1].contains('┼'), "a rule under the head: {lines:?}");
+    assert!(lines[2].starts_with("claude  │ 812"), "{lines:?}");
+    for line in &lines {
+        assert!(line.width() <= 30, "{line:?}");
+    }
+
+    // Squeezed into a pane that cannot hold it, every column still gets some.
+    let narrow = lines_of(source, 14);
+    for line in &narrow {
+        assert!(line.width() <= 14, "{line:?}");
+        assert!(!line.contains('|'), "still a table, not pipes: {line:?}");
+    }
 }
 
 #[test]
@@ -329,4 +367,167 @@ fn the_reader_opens_on_the_turn_the_hit_came_from() {
         "the reader lands on the matching turn:\n{screen}"
     );
     assert!(screen.contains("aaaaaaaa"), "the header names the session");
+}
+
+// ---- tool calls ----------------------------------------------------------
+
+/// Forty calls between two sentences is a normal turn, and printed one per line
+/// the sentences are what you scroll past.
+#[test]
+fn a_long_run_of_tool_calls_folds_to_one_line() {
+    let mut calls: Vec<String> = (0..5)
+        .map(|i| read_call(&format!("r{i}"), &format!("src/a{i}.rs")))
+        .collect();
+    calls.extend((0..3).map(|i| bash_call(&format!("b{i}"), &format!("ls {i}"))));
+    let turn = turn_with(&calls, false);
+
+    let folded = shown(&turn, Show::default());
+    assert!(
+        folded.contains("8 tool calls") && folded.contains("Read ×5") && folded.contains("Bash ×3"),
+        "a run says how many and of what:\n{folded}"
+    );
+    assert!(
+        !folded.contains("src/a0.rs"),
+        "and not each one of them:\n{folded}"
+    );
+
+    // Which is a fold, not a loss: every call is one key away.
+    let open = shown(
+        &turn,
+        Show {
+            tools: true,
+            ..Show::default()
+        },
+    );
+    assert!(open.contains("Read(src/a0.rs)"), "{open}");
+    assert!(open.contains("Bash(ls 2)"), "{open}");
+    assert!(!open.contains("8 tool calls"), "{open}");
+}
+
+/// A run short enough to read is left alone: two reads in a row are part of the
+/// sentence around them.
+#[test]
+fn a_short_run_is_not_folded() {
+    let calls = vec![
+        read_call("s0", "src/short0.rs"),
+        read_call("s1", "src/short1.rs"),
+    ];
+    let screen = shown(&turn_with(&calls, false), Show::default());
+    assert!(screen.contains("Read(src/short0.rs)"), "{screen}");
+    assert!(screen.contains("Read(src/short1.rs)"), "{screen}");
+    assert!(!screen.contains("tool calls"), "{screen}");
+}
+
+/// A denied or failed call must not disappear into a count. It is the thing you
+/// went looking for.
+#[test]
+fn a_folded_run_still_says_something_went_wrong() {
+    let calls: Vec<String> = (0..6)
+        .map(|i| bash_call(&format!("e{i}"), &format!("ls {i}")))
+        .collect();
+    let turn = turn_with(&calls, true);
+    let line = ui::turn_lines(&turn, Show::default(), 80)
+        .iter()
+        .map(|l| l.to_string())
+        .find(|l| l.contains("tool calls"))
+        .expect("the run folded");
+    assert!(
+        line.contains("6 tool calls") && line.contains("Bash ×6"),
+        "{line}"
+    );
+    assert!(line.contains("✗ 1"), "a denial survives the fold: {line}");
+}
+
+/// Prose splits a run: calls that answered one sentence do not get counted in
+/// with the ones that answered the next.
+#[test]
+fn text_between_two_runs_keeps_them_apart() {
+    let head = format!(r#""sessionId":"{SESSION}","cwd":"/code/demo""#);
+    let step = |req: &str, body: String| {
+        format!(
+            r#"{{"type":"assistant",{head},"requestId":"{req}","timestamp":"2026-08-08T05:20:30Z","message":{{"id":"m_{req}","content":[{body}],"usage":{{"output_tokens":1}}}}}}"#
+        )
+    };
+    let four = |tag: &str| {
+        (0..4)
+            .map(|i| read_call(&format!("{tag}{i}"), &format!("src/{tag}{i}.rs")))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let lines = vec![
+        format!(
+            r#"{{"type":"user",{head},"timestamp":"2026-08-08T05:20:00Z","message":{{"content":"go"}}}}"#
+        ),
+        step("req_1", four("a")),
+        step(
+            "req_2",
+            r#"{"type":"text","text":"now the other half"}"#.to_string(),
+        ),
+        step("req_3", four("b")),
+    ];
+    let turn = parse_turn(&lines);
+    let screen = shown(&turn, Show::default());
+    assert_eq!(
+        screen.matches("4 tool calls").count(),
+        2,
+        "two runs of four, not one of eight:\n{screen}"
+    );
+}
+
+#[test]
+fn o_toggles_the_tool_calls_in_the_reader() {
+    let (_dir, mut app) = app();
+    press(&mut app, KeyCode::Enter);
+    assert!(!app.tools, "folded until asked");
+    press(&mut app, KeyCode::Char('o'));
+    assert!(app.tools);
+    press(&mut app, KeyCode::Char('o'));
+    assert!(!app.tools);
+}
+
+fn read_call(id: &str, path: &str) -> String {
+    format!(r#"{{"type":"tool_use","id":"{id}","name":"Read","input":{{"file_path":"{path}"}}}}"#)
+}
+
+fn bash_call(id: &str, command: &str) -> String {
+    format!(r#"{{"type":"tool_use","id":"{id}","name":"Bash","input":{{"command":"{command}"}}}}"#)
+}
+
+fn shown(turn: &whence::model::Turn, show: Show) -> String {
+    ui::turn_lines(turn, show, 80)
+        .iter()
+        .map(|l| l.to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// One turn built from raw tool-use blocks, so a test can say exactly how long
+/// a run is rather than inventing a `Turn` by hand — and so the folding is
+/// checked against what the adapter really produces.
+fn turn_with(calls: &[String], deny_last: bool) -> whence::model::Turn {
+    let head = format!(r#""sessionId":"{SESSION}","cwd":"/code/demo""#);
+    let mut lines = vec![
+        format!(
+            r#"{{"type":"user",{head},"timestamp":"2026-08-08T05:20:00Z","message":{{"content":"go"}}}}"#
+        ),
+        format!(
+            r#"{{"type":"assistant",{head},"requestId":"req_1","timestamp":"2026-08-08T05:20:30Z","message":{{"id":"msg_1","content":[{}],"usage":{{"output_tokens":1}}}}}}"#,
+            calls.join(",")
+        ),
+    ];
+    if deny_last {
+        let id = calls.len() - 1;
+        lines.push(format!(
+            r#"{{"type":"user",{head},"toolDenialKind":"user_reject","message":{{"content":[{{"type":"tool_result","tool_use_id":"e{id}","is_error":true,"content":"denied"}}]}}}}"#
+        ));
+    }
+    parse_turn(&lines)
+}
+
+fn parse_turn(lines: &[String]) -> whence::model::Turn {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = dir.path().join(format!("{SESSION}.jsonl"));
+    std::fs::write(&file, lines.join("\n")).expect("write");
+    let (session, _) = whence::source::normalize_with(Harness::Claude, &file).expect("parse");
+    session.turns.into_iter().next().expect("one turn")
 }

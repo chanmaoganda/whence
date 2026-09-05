@@ -15,16 +15,21 @@
 //!   the right edge, because a rewrapped shell command is no longer a command
 //!   you can copy and run.
 
-use super::app::{position_of, App, Laid, Reading, View};
+use super::app::{position_of, App, Laid, Reading, Show, View};
 use crate::model::{first_line, short_id, when, Session, ToolCall, Turn};
 use crate::render::{self, Block as Md, Doc, Emphasis, Span as MdSpan};
 use crate::search::{Excerpt, Hit};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Padding, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, Padding, Paragraph};
 use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+/// The selected row's background. An indexed colour rather than an RGB one, so
+/// it comes from the terminal's own palette and stays legible under whichever
+/// theme the user actually has.
+const SELECTED: Color = Color::Indexed(24);
 
 /// Below this the preview pane costs the results list more than it gives back,
 /// so the results get the whole width.
@@ -43,7 +48,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
 fn search_view(frame: &mut Frame, app: &mut App) {
     let [top, body, foot] = Layout::vertical([
-        Constraint::Length(1),
+        Constraint::Length(3),
         Constraint::Min(1),
         Constraint::Length(1),
     ])
@@ -67,6 +72,12 @@ fn search_view(frame: &mut Frame, app: &mut App) {
     frame.render_widget(status_line(app), foot);
 }
 
+/// The search box.
+///
+/// A box, rather than a line at the top of the screen: this is the one thing
+/// on screen you type into, and a bare row of text at the top of a wall of
+/// results does not look like anywhere you can type. The border is the cheapest
+/// way to say so, and it carries the filter chips on its own top edge.
 fn query_line(frame: &mut Frame, app: &App, area: Rect) {
     let chips = format!(
         " {} · {} · {} ",
@@ -78,29 +89,41 @@ fn query_line(frame: &mut Frame, app: &App, area: Rect) {
             n => format!("{n} matches"),
         }
     );
-    let [left, right] =
-        Layout::horizontal([Constraint::Min(8), Constraint::Length(chips.width() as u16)])
-            .areas(area);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(if app.query.is_empty() {
+            Color::DarkGray
+        } else {
+            Color::Cyan
+        }))
+        .title(Span::styled(
+            " search ",
+            Style::new().fg(Color::Cyan).bold(),
+        ))
+        .title_top(
+            Line::from(Span::styled(chips, Style::new().fg(Color::DarkGray))).right_aligned(),
+        )
+        .padding(Padding::horizontal(1));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
     let prompt = Span::styled("❯ ", Style::new().fg(Color::Cyan).bold());
     let typed = if app.query.is_empty() {
         Span::styled(
             "search prompts, replies, thinking and edits",
-            Style::new().dim(),
+            Style::new().fg(Color::DarkGray),
         )
     } else {
-        Span::raw(app.query.clone())
+        // The query is the one string on screen the user wrote themselves;
+        // it gets the brightest thing a terminal has.
+        Span::styled(app.query.clone(), Style::new().fg(Color::White).bold())
     };
-    frame.render_widget(Line::from(vec![prompt, typed]), left);
-    frame.render_widget(
-        Line::from(Span::styled(chips, Style::new().fg(Color::DarkGray))),
-        right,
-    );
+    frame.render_widget(Line::from(vec![prompt, typed]), inner);
 
     // The real cursor, so the terminal blinks it where the caret is and a
     // wide character does not push it half a column out.
-    let at = left.x + 2 + app.query[..app.cursor].width() as u16;
-    frame.set_cursor_position((at.min(left.right().saturating_sub(1)), left.y));
+    let at = inner.x + 2 + app.query[..app.cursor].width() as u16;
+    frame.set_cursor_position((at.min(inner.right().saturating_sub(1)), inner.y));
 }
 
 fn results_list(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -122,19 +145,31 @@ fn results_list(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    // Two columns of padding, and one for the selection marker.
-    let width = area.width.saturating_sub(3) as usize;
+    // Two columns of padding, and two for the selection bar.
+    let width = area.width.saturating_sub(4) as usize;
     let items: Vec<ListItem> = app.hits.iter().map(|hit| hit_item(hit, width)).collect();
     let list = List::new(items)
         .block(Block::new().padding(Padding::new(1, 1, 0, 0)))
-        .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
+        // Not `REVERSED`. Reversing swaps every cell's colours, so the dimmed
+        // excerpt under a hit turns light grey on white and the words you were
+        // reading disappear. A background of our own keeps every colour in the
+        // row, and clearing DIM brings the excerpt up rather than washing it out.
+        .highlight_style(
+            Style::new()
+                .bg(SELECTED)
+                .remove_modifier(Modifier::DIM)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▌ ");
     frame.render_stateful_widget(list, area, &mut app.list);
 }
 
 /// One result: where it came from, then why it matched.
 fn hit_item(hit: &Hit, width: usize) -> ListItem<'static> {
     let mut header = vec![
-        Span::styled(when(hit.timestamp), Style::new().fg(Color::DarkGray)),
+        // Grey rather than dark grey: it has to stay legible on the selection
+        // bar as well as recede on a plain row.
+        Span::styled(when(hit.timestamp), Style::new().fg(Color::Gray)),
         Span::raw("  "),
         Span::styled(format!("{:<6}", hit.harness), Style::new().dim()),
         Span::raw(" "),
@@ -157,7 +192,7 @@ fn hit_item(hit: &Hit, width: usize) -> ListItem<'static> {
     };
     header.push(Span::styled(
         format!("  {}", project_name(&hit.project)),
-        Style::new().fg(Color::Blue),
+        Style::new().fg(Color::LightBlue),
     ));
     if !what.is_empty() {
         header.push(Span::styled(format!("  {what}"), Style::new().dim()));
@@ -216,11 +251,11 @@ fn preview_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let thinking = app.thinking;
+    let show = app.show();
     let Some(preview) = &mut app.preview else {
         return;
     };
-    preview.lay(inner.width, inner.height, thinking);
+    preview.lay(inner.width, inner.height, show);
     frame.render_widget(body_paragraph(preview), inner);
 }
 
@@ -234,7 +269,7 @@ fn read_view(frame: &mut Frame, app: &mut App) {
     ])
     .areas(frame.area());
 
-    let thinking = app.thinking;
+    let show = app.show();
     let Some(reading) = &mut app.reading else {
         return;
     };
@@ -243,7 +278,7 @@ fn read_view(frame: &mut Frame, app: &mut App) {
         width: body.width.saturating_sub(2),
         ..body
     };
-    reading.lay(inner.width, inner.height, thinking);
+    reading.lay(inner.width, inner.height, show);
 
     frame.render_widget(read_header(reading), top);
     frame.render_widget(body_paragraph(reading), inner);
@@ -253,12 +288,13 @@ fn read_view(frame: &mut Frame, app: &mut App) {
             ("[ ]", "turn"),
             (
                 "t",
-                if thinking {
+                if show.thinking {
                     "hide thinking"
                 } else {
                     "thinking"
                 },
             ),
+            ("o", if show.tools { "fold tools" } else { "tools" }),
             ("esc", "back"),
             ("^C", "quit"),
         ]),
@@ -313,23 +349,33 @@ fn body_paragraph(reading: &Reading) -> Paragraph<'static> {
 // ---- turning a session into lines ---------------------------------------
 
 /// A whole conversation, broken to `width`, with the line each turn starts on.
-pub fn conversation(session: &Session, thinking: bool, width: u16) -> Laid {
+pub fn conversation(session: &Session, show: Show, width: u16) -> Laid {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut starts = Vec::with_capacity(session.turns.len());
     for turn in &session.turns {
         starts.push(lines.len());
-        lines.extend(turn_lines(turn, thinking, width));
+        lines.extend(turn_lines(turn, show, width));
     }
     Laid {
         width,
-        thinking,
+        show,
         lines,
         starts,
     }
 }
 
+/// A run of tool calls longer than this is folded to one line. Two or three
+/// reads in a row are part of the sentence around them; the twentieth is not.
+const FOLD_FROM: usize = 3;
+
 /// One turn: what was asked, what came back, and what it did.
-pub fn turn_lines(turn: &Turn, thinking: bool, width: u16) -> Vec<Line<'static>> {
+///
+/// Tool calls are gathered rather than printed as they arrive. A single answer
+/// can be eighty calls with three sentences threaded through it, and printed
+/// one per line the sentences are what you scroll past. So a *run* — every call
+/// with no prose between it and the next — collapses to a single line saying
+/// how many there were and of what, and `o` puts them all back.
+pub fn turn_lines(turn: &Turn, show: Show, width: u16) -> Vec<Line<'static>> {
     let w = width.max(8) as usize;
     let mut lines = vec![turn_rule(turn, w)];
 
@@ -339,14 +385,20 @@ pub fn turn_lines(turn: &Turn, thinking: bool, width: u16) -> Vec<Line<'static>>
             w,
             "❯ ",
             "  ",
-            Style::new().fg(Color::Cyan),
-            Style::new().fg(Color::Cyan),
+            Style::new().fg(Color::Cyan).bold(),
+            Style::new().fg(Color::Cyan).bold(),
         ));
         lines.push(Line::default());
     }
 
+    let mut run: Vec<&ToolCall> = Vec::new();
     for step in &turn.steps {
-        if thinking && !step.thinking.trim().is_empty() {
+        let thinking = show.thinking && !step.thinking.trim().is_empty();
+        let talking = !step.text.trim().is_empty();
+        if thinking || talking {
+            lines.extend(tool_run(&std::mem::take(&mut run), show.tools, w));
+        }
+        if thinking {
             lines.extend(flow_text(
                 step.thinking.trim(),
                 w,
@@ -357,18 +409,63 @@ pub fn turn_lines(turn: &Turn, thinking: bool, width: u16) -> Vec<Line<'static>>
             ));
             lines.push(Line::default());
         }
-        if !step.text.trim().is_empty() {
+        if talking {
             lines.extend(wrap(&render::renderer().parse(&step.text), width));
             lines.push(Line::default());
         }
-        for call in &step.tool_calls {
-            lines.push(tool_line(call, w));
-        }
-        if !step.tool_calls.is_empty() {
-            lines.push(Line::default());
+        run.extend(step.tool_calls.iter());
+    }
+    lines.extend(tool_run(&run, show.tools, w));
+    lines
+}
+
+/// A run of consecutive tool calls, either spelled out or folded to a line.
+fn tool_run(run: &[&ToolCall], expanded: bool, width: usize) -> Vec<Line<'static>> {
+    if run.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = if expanded || run.len() <= FOLD_FROM {
+        run.iter().map(|call| tool_line(call, width)).collect()
+    } else {
+        vec![folded_tools(run, width)]
+    };
+    lines.push(Line::default());
+    lines
+}
+
+/// `· 23 tools  Bash ×11 · Read ×8 · Edit ×4  ✗ 2` — the shape of the work,
+/// which is what you actually want from a run you are scrolling past.
+fn folded_tools(run: &[&ToolCall], width: usize) -> Line<'static> {
+    let mut counts: Vec<(&str, usize)> = Vec::new();
+    for call in run {
+        match counts.iter_mut().find(|(name, _)| *name == call.name) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((call.name.as_str(), 1)),
         }
     }
-    lines
+    // Busiest first, and ties in the order they were called, so the line is
+    // stable between redraws.
+    counts.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+
+    let wrong = run.iter().filter(|c| c.denied || c.is_error).count();
+    let mark =
+        (wrong > 0).then(|| Span::styled(format!("  ✗ {wrong}"), Style::new().fg(Color::Yellow)));
+
+    let head = format!("· {} tool calls  ", run.len());
+    let budget =
+        width.saturating_sub(head.width() + mark.as_ref().map_or(0, |s| s.content.width()));
+    let names = counts
+        .iter()
+        .map(|(name, n)| format!("{name} ×{n}"))
+        .collect::<Vec<_>>()
+        .join(" · ");
+
+    let mut spans = vec![
+        Span::styled(head, Style::new().fg(Color::Magenta)),
+        Span::styled(clip(&names, budget), Style::new().fg(Color::DarkGray)),
+    ];
+    spans.extend(mark);
+    Line::from(spans)
 }
 
 fn turn_rule(turn: &Turn, width: usize) -> Line<'static> {
@@ -413,28 +510,43 @@ fn tool_line(call: &ToolCall, width: usize) -> Line<'static> {
 pub fn wrap(doc: &Doc, width: u16) -> Vec<Line<'static>> {
     let w = width.max(8) as usize;
     let mut out: Vec<Line<'static>> = Vec::new();
+    let mut last: Option<&Md> = None;
     for block in &doc.blocks {
-        if !out.is_empty() {
+        // Blocks are separated by a blank line, except between two bullets: a
+        // list double-spaced is twice as long and reads as unrelated lines
+        // rather than as a list.
+        let tight = matches!((last, block), (Some(Md::Bullet { .. }), Md::Bullet { .. }));
+        if !out.is_empty() && !tight {
             out.push(Line::default());
         }
+        last = Some(block);
         match block {
             Md::Paragraph(spans) => out.extend(flow(spans, w, "", "", Style::new(), Style::new())),
-            Md::Heading { spans, .. } => out.extend(flow(
+            // The level is worth a mark rather than a font: a terminal has one
+            // size, and `###` three levels down still has to look subordinate.
+            Md::Heading { level, spans } => out.extend(flow(
                 spans,
                 w,
+                &format!("{} ", "#".repeat((*level).clamp(1, 6) as usize)),
                 "",
-                "",
-                Style::new(),
-                Style::new().bold().fg(Color::Yellow),
+                Style::new().fg(Color::DarkGray),
+                Style::new().bold().fg(heading_color(*level)),
             )),
-            Md::Bullet { depth, spans } => {
+            Md::Bullet {
+                depth,
+                marker,
+                spans,
+            } => {
                 let indent = "  ".repeat(*depth as usize);
+                // The marker's own width, so `10.` and `•` both hang their
+                // continuation lines under the text rather than under the mark.
+                let first = format!("{indent}{marker} ");
                 out.extend(flow(
                     spans,
                     w,
-                    &format!("{indent}• "),
-                    &format!("{indent}  "),
-                    Style::new().fg(Color::DarkGray),
+                    &first,
+                    &" ".repeat(first.width()),
+                    Style::new().fg(Color::Cyan),
                     Style::new(),
                 ))
             }
@@ -456,6 +568,7 @@ pub fn wrap(doc: &Doc, width: u16) -> Vec<Line<'static>> {
                     ),
                 ])
             })),
+            Md::Table { head, rows } => out.extend(table_lines(head, rows, w)),
             Md::Rule => out.push(Line::from(Span::styled(
                 "─".repeat(w),
                 Style::new().fg(Color::DarkGray),
@@ -463,6 +576,94 @@ pub fn wrap(doc: &Doc, width: u16) -> Vec<Line<'static>> {
         }
     }
     out
+}
+
+/// A markdown table, in columns.
+///
+/// Columns get the width they ask for when the pane can afford it, and are cut
+/// down in proportion when it cannot — a cell is clipped rather than wrapped,
+/// because a table whose rows are two lines tall stops reading as a table.
+fn table_lines(head: &[String], rows: &[Vec<String>], width: usize) -> Vec<Line<'static>> {
+    let cols = head.len().max(rows.iter().map(Vec::len).max().unwrap_or(0));
+    if cols == 0 {
+        return Vec::new();
+    }
+    const GAP: &str = " │ ";
+    let mut want = vec![0usize; cols];
+    for row in std::iter::once(&head.to_vec()).chain(rows) {
+        for (i, cell) in row.iter().enumerate().take(cols) {
+            want[i] = want[i].max(cell.trim().width());
+        }
+    }
+
+    let budget = width.saturating_sub(GAP.width() * (cols - 1)).max(cols * 3);
+    let asked: usize = want.iter().sum();
+    if asked > budget {
+        // Proportional, with a floor: a column squeezed to nothing tells you
+        // less than a column that says it was cut.
+        for w in want.iter_mut() {
+            *w = (*w * budget / asked.max(1)).max(3);
+        }
+        while want.iter().sum::<usize>() > budget {
+            let Some(worst) = longest(&want) else { break };
+            want[worst] -= 1;
+        }
+    }
+
+    let gap = Span::styled(GAP.to_string(), Style::new().fg(Color::DarkGray));
+    let mut out = Vec::with_capacity(rows.len() + 2);
+    if !head.is_empty() {
+        out.push(row_line(head, &want, gap.clone(), Style::new().bold()));
+        out.push(Line::from(Span::styled(
+            want.iter()
+                .map(|w| "─".repeat(*w))
+                .collect::<Vec<_>>()
+                .join("─┼─"),
+            Style::new().fg(Color::DarkGray),
+        )));
+    }
+    for row in rows {
+        out.push(row_line(row, &want, gap.clone(), Style::new()));
+    }
+    out
+}
+
+fn row_line(row: &[String], widths: &[usize], gap: Span<'static>, style: Style) -> Line<'static> {
+    let mut spans = Vec::with_capacity(widths.len() * 2);
+    for (i, w) in widths.iter().enumerate() {
+        if i > 0 {
+            spans.push(gap.clone());
+        }
+        let cell = row.get(i).map(|c| c.trim()).unwrap_or("");
+        spans.push(Span::styled(pad(&clip(cell, *w), *w), style));
+    }
+    Line::from(spans)
+}
+
+/// The widest column, which is the one that can afford to lose a character.
+fn longest(widths: &[usize]) -> Option<usize> {
+    widths
+        .iter()
+        .enumerate()
+        .filter(|(_, w)| **w > 3)
+        .max_by_key(|(_, w)| **w)
+        .map(|(i, _)| i)
+}
+
+fn pad(text: &str, width: usize) -> String {
+    let mut out = text.to_string();
+    out.push_str(&" ".repeat(width.saturating_sub(text.width())));
+    out
+}
+
+/// Headings shade off as they get deeper, so `##` under a `#` reads as being
+/// under it in a terminal that has exactly one font size.
+fn heading_color(level: u8) -> Color {
+    match level {
+        1 => Color::Yellow,
+        2 => Color::LightYellow,
+        _ => Color::White,
+    }
 }
 
 fn flow_text(
@@ -633,6 +834,7 @@ fn style_of(emphasis: Emphasis, base: Style) -> Style {
         Emphasis::None => base,
         Emphasis::Strong => base.bold().not_dim(),
         Emphasis::Emph => base.italic(),
+        Emphasis::Strike => base.crossed_out(),
         Emphasis::Code => base.fg(Color::Green),
         Emphasis::Link => base.fg(Color::Blue).underlined(),
     }
@@ -642,6 +844,9 @@ fn style_of(emphasis: Emphasis, base: Style) -> Style {
 fn clip(text: &str, width: usize) -> String {
     if text.width() <= width {
         return text.to_string();
+    }
+    if width == 0 {
+        return String::new();
     }
     let mut out = String::new();
     let mut col = 0;

@@ -28,7 +28,7 @@
 pub mod app;
 pub mod ui;
 
-pub use app::{App, View};
+pub use app::{App, Show, View};
 
 use anyhow::Result;
 use ratatui::crossterm::event::{self, Event};

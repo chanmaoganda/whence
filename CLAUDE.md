@@ -30,11 +30,14 @@ harness adds one.
   entry in `ALL`. Nothing else in the tree changes.
 - `src/source/<harness>/raw.rs` mirrors that harness's on-disk JSON exactly and
   interprets nothing. `normalize.rs` is where the hard work is.
-- `src/render/` is the seam for markdown. Everything in a transcript is
-  markdown; today `Plain` passes it through (recognising fenced code, which must
-  never be reflowed). A real renderer is a new `Render` impl and nothing above
-  it changes. **The index reads markdown source, never a rendering** — excerpt
-  offsets have to point into the stored text.
+- `src/render/` is the seam for markdown. `Markdown` (pulldown-cmark) parses it
+  into `Doc`; `Plain` remains as the escape hatch that passes markup through
+  untouched. Both must keep fenced code verbatim — it is never reflowed.
+  **The index reads markdown source, never a rendering** — excerpt offsets have
+  to point into the stored text. Inline markup becomes `Emphasis` on spans,
+  never characters, so a line stays free to break inside a bold run; tables are
+  the one construct that gives up its inline markup, because a clipped column
+  cannot carry emphasis ranges through the clip.
 - `whence show` and `whence inspect` go through `source` directly, not the
   index, so reading a session back never depends on the index being current.
 - `src/tui/` is the browser. `app.rs` is the state machine and never mentions a
@@ -43,7 +46,12 @@ harness adds one.
   mid-run, because Chinese has no spaces to break on; it never reflows a code
   block. The reader loads sessions through `source` using the path the index
   stored on the hit, so it shows what the index deliberately never keeps —
-  tool calls above all.
+  tool calls above all. Those are *folded*: a run of more than three with no
+  prose between them collapses to one line of counts, because a turn is often
+  forty calls around three sentences. `o` expands them, and the fold always
+  keeps the number of denied or failed calls — that is the one you went looking
+  for. Prompts are deliberately **not** rendered as markdown: a prompt is what
+  was typed, and this is a tool for reading back what happened.
 
 ## Format traps
 
@@ -143,7 +151,7 @@ ignored, and a corrupt line must never abort a file.
 ## Status
 
 Done: the `Source` trait and registry, the Claude and Codex adapters, the
-markdown seam, the index and searcher (whose schema carries a `harness` field,
+markdown renderer, the index and searcher (whose schema carries a `harness` field,
 so results say where a hit came from and `--harness` filters work), and
 `whence sources | inspect | stats | index | search | file | show | completions |
 tui`.

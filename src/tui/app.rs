@@ -59,6 +59,8 @@ pub struct App {
     /// The conversation being read full-screen.
     pub reading: Option<Reading>,
     pub thinking: bool,
+    /// Every tool call spelled out, rather than a run of them folded to a line.
+    pub tools: bool,
     pub quit: bool,
 
     cache: Vec<(PathBuf, Rc<Session>)>,
@@ -89,6 +91,7 @@ impl App {
             preview: None,
             reading: None,
             thinking: false,
+            tools: false,
             quit: false,
             cache: Vec::new(),
             // The opening screen is a search too: with no words it is the most
@@ -107,6 +110,16 @@ impl App {
         }
         if std::mem::take(&mut self.preview_pending) {
             self.load_preview();
+        }
+    }
+
+    /// What the reader is showing beyond the conversation itself. Carried as
+    /// one value because it is also what a laid-out page is keyed on: change
+    /// either flag and the lines have to be built again.
+    pub fn show(&self) -> Show {
+        Show {
+            thinking: self.thinking,
+            tools: self.tools,
         }
     }
 
@@ -311,6 +324,9 @@ impl App {
             KeyCode::Char('t') => {
                 self.thinking = !self.thinking;
             }
+            KeyCode::Char('o') => {
+                self.tools = !self.tools;
+            }
             _ => {}
         }
     }
@@ -398,10 +414,20 @@ pub struct Reading {
     goto: Option<usize>,
 }
 
+/// What the reader is showing beyond the conversation itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Show {
+    /// Reasoning text, where the harness left any in the clear.
+    pub thinking: bool,
+    /// Every tool call on its own line. Folded by default: a turn can be forty
+    /// of them between two sentences, and the sentences are what you came for.
+    pub tools: bool,
+}
+
 /// A conversation broken to a particular width.
 pub struct Laid {
     pub width: u16,
-    pub thinking: bool,
+    pub show: Show,
     pub lines: Vec<Line<'static>>,
     /// The line each turn starts on, parallel to `session.turns`.
     pub starts: Vec<usize>,
@@ -423,13 +449,13 @@ impl Reading {
     /// Break the conversation to `width` if that has not already been done, and
     /// resolve any pending jump. Called from the draw, which is the first moment
     /// a width exists.
-    pub fn lay(&mut self, width: u16, height: u16, thinking: bool) {
+    pub fn lay(&mut self, width: u16, height: u16, show: Show) {
         let stale = match &self.layout {
-            Some(laid) => laid.width != width || laid.thinking != thinking,
+            Some(laid) => laid.width != width || laid.show != show,
             None => true,
         };
         if stale {
-            self.layout = Some(super::ui::conversation(&self.session, thinking, width));
+            self.layout = Some(super::ui::conversation(&self.session, show, width));
         }
         let laid = self.layout.as_ref().expect("just laid out");
         let jump = self

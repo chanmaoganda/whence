@@ -2,9 +2,8 @@
 //!
 //! Nearly everything in a transcript is markdown: replies are written as
 //! markdown by every harness, and prompts are typed as markdown by most people.
-//! Today we show it as-is. This module exists so that showing it *properly*
-//! later is a new [`Render`] implementation rather than an edit to every
-//! surface that prints text.
+//! This module is the one place that knows how to read it, so that every
+//! surface — the CLI, the TUI, whatever comes next — shows the same thing.
 //!
 //! The seam is deliberately placed here, between the model and the display:
 //!
@@ -16,7 +15,8 @@
 //!        └─▶ Render::parse ──▶ Doc ──▶ wrap(width) ──▶ CLI / TUI
 //! ```
 //!
-//! Two rules that a markdown implementation must not break:
+//! Two rules the [`Markdown`] implementation lives by, and which any successor
+//! must keep:
 //!
 //! 1. **The index reads the source, not the rendering.** You search for what was
 //!    written — backticks, asterisks and all — and a hit's offsets have to point
@@ -28,8 +28,13 @@
 //!    spaces, so a renderer that pre-wraps on whitespace hides most of this
 //!    corpus. See `tui::ui::wrap`.
 //!
-//! When the time comes, the implementation to add is `Markdown`, parsing with
-//! `pulldown-cmark` into the same [`Doc`]. Nothing above this module changes.
+//! [`Plain`] is what came before and stays as the escape hatch: it recognises
+//! fenced code and passes everything else through untouched, which is what you
+//! want the moment a reply's markup is the thing you are trying to read.
+
+pub mod markdown;
+
+pub use markdown::Markdown;
 
 /// A parsed body of text, ready to be laid out at a width not yet known.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -53,9 +58,20 @@ pub enum Block {
     },
     Bullet {
         depth: u8,
+        /// What goes in front: `•`, or `3.` for an ordered list. Empty for a
+        /// second paragraph inside one item, which indents but does not
+        /// re-bullet.
+        marker: String,
         spans: Vec<Span>,
     },
     Quote(Vec<Span>),
+    /// Cells flattened to text. A table is laid out in columns and a column
+    /// that has to be clipped cannot also carry emphasis through the clip, so
+    /// this is the one construct that gives up its inline markup.
+    Table {
+        head: Vec<String>,
+        rows: Vec<Vec<String>>,
+    },
     Rule,
 }
 
@@ -82,6 +98,7 @@ pub enum Emphasis {
     None,
     Strong,
     Emph,
+    Strike,
     Code,
     Link,
 }
@@ -91,12 +108,13 @@ pub trait Render: Send + Sync {
     fn parse(&self, source: &str) -> Doc;
 }
 
-/// What we do today: no inline markup, but fenced code is still recognised.
+/// No inline markup, but fenced code is still recognised.
 ///
-/// Recognising fences is not an early start on markdown — it is a layout
-/// correctness fix. A code block that gets reflowed to the terminal width is
-/// unreadable and, worse, is no longer the command you could copy and run. Every
-/// other construct falls through as plain text.
+/// Recognising fences is not markdown by halves — it is a layout correctness
+/// fix. A code block that gets reflowed to the terminal width is unreadable
+/// and, worse, is no longer the command you could copy and run. Every other
+/// construct falls through as the characters that were typed, which is exactly
+/// what you want when the markup itself is what you are reading.
 pub struct Plain;
 
 const FENCE: &str = "```";
@@ -148,11 +166,11 @@ impl Render for Plain {
     }
 }
 
-static PLAIN: Plain = Plain;
+static MARKDOWN: Markdown = Markdown;
 
 /// The renderer every surface uses. One place to switch over.
 pub fn renderer() -> &'static dyn Render {
-    &PLAIN
+    &MARKDOWN
 }
 
 impl Doc {
@@ -167,6 +185,13 @@ impl Doc {
             match block {
                 Block::Code { lines, .. } => out.push_str(&lines.join("\n")),
                 Block::Rule => out.push_str("---"),
+                Block::Table { head, rows } => {
+                    for row in std::iter::once(head).chain(rows) {
+                        out.push_str(&row.join(" | "));
+                        out.push('\n');
+                    }
+                    out.pop();
+                }
                 Block::Paragraph(spans)
                 | Block::Heading { spans, .. }
                 | Block::Bullet { spans, .. }

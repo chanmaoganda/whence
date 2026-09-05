@@ -66,9 +66,17 @@ volume and they are where pasted secrets live.
 
 `whence tui` is the same search with a screen around it: results narrow as you
 type, the pane beside them previews the conversation each one came from, and
-`⏎` opens it. Text is broken to the width it is drawn at, measured in columns
-and split mid-run where the script has no spaces — code blocks are the one thing
-never reflowed, because a rewrapped shell command is no longer one you can run.
+`⏎` opens it. Replies are shown as markdown — headings, lists, tables and
+emphasis, not the asterisks and pipes they were written with. Text is broken to
+the width it is drawn at, measured in columns and split mid-run where the script
+has no spaces — code blocks are the one thing never reflowed, because a
+rewrapped shell command is no longer one you can run.
+
+A run of tool calls with no prose between it and the next folds to a line
+(`· 23 tool calls  Bash ×11 · Read ×8 · Edit ×4`), because a turn is routinely
+forty calls with three sentences threaded through them and the sentences are
+what you came for. `o` unfolds them, `t` shows reasoning where a harness left
+any in the clear.
 
 ## Status
 

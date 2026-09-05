@@ -136,9 +136,12 @@ fn print_turn(turn: &Turn, thinking: bool) {
     }
 }
 
-/// Print a reply through the renderer. Today that only distinguishes fenced
-/// code, which is marked rather than reflowed; when a markdown renderer lands,
-/// this is where it takes effect.
+/// Print a reply through the renderer.
+///
+/// The structure markdown carries — a heading, a bullet, a table row — is worth
+/// keeping even with no colour to spend on it, because it is what tells you
+/// where one thought ends. Inline emphasis is dropped: the source is going to a
+/// pipe as often as to a terminal, and `**` around a word helps neither.
 fn print_body(text: &str) {
     for block in render::renderer().parse(text).blocks {
         match block {
@@ -149,24 +152,37 @@ fn print_body(text: &str) {
                 }
                 println!("  └─");
             }
-            other => {
-                for span in block_spans(&other) {
-                    for line in span.lines() {
-                        println!("  {line}");
-                    }
+            Block::Heading { level, spans } => {
+                println!(
+                    "  {} {}",
+                    "#".repeat(level.clamp(1, 6) as usize),
+                    flat(&spans)
+                );
+            }
+            Block::Bullet {
+                depth,
+                marker,
+                spans,
+            } => {
+                let indent = "  ".repeat(depth as usize);
+                println!("  {indent}{marker} {}", flat(&spans));
+            }
+            Block::Quote(spans) => println!("  ▏ {}", flat(&spans)),
+            Block::Table { head, rows } => {
+                for row in std::iter::once(&head).chain(rows.iter()) {
+                    println!("  {}", row.join(" │ "));
+                }
+            }
+            Block::Rule => println!("  ───"),
+            Block::Paragraph(spans) => {
+                for line in flat(&spans).lines() {
+                    println!("  {line}");
                 }
             }
         }
     }
 }
 
-fn block_spans(block: &Block) -> Vec<String> {
-    match block {
-        Block::Paragraph(spans)
-        | Block::Heading { spans, .. }
-        | Block::Bullet { spans, .. }
-        | Block::Quote(spans) => spans.iter().map(|s| s.text.clone()).collect(),
-        Block::Rule => vec!["---".into()],
-        Block::Code { lines, .. } => lines.clone(),
-    }
+fn flat(spans: &[whence::render::Span]) -> String {
+    spans.iter().map(|s| s.text.as_str()).collect()
 }
