@@ -1,0 +1,73 @@
+# whence
+
+*Whence did this come?* — a local search engine and time machine for your
+coding agents' transcripts.
+
+Claude Code and Codex both leave a detailed record of what you asked, what they
+did and why, and then it is never read again. `whence` makes that record
+searchable, replayable and attributable — across every agent you use, entirely
+on your own machine. No telemetry, no uploads.
+
+```console
+$ whence sources
+harness    files  root
+claude       965  /home/ethan/.claude/projects
+codex          9  /home/ethan/.codex/sessions
+
+$ whence "card view"
+6 matches across 3 sessions (claude, codex)
+
+2026-07-11 02:04  codex   prompt  /code/stock/rtrade  1498aa04#5
+  half page of blank, and card view cannot be scrolled, and not grid view correctly
+
+$ whence show 1498aa04#5        # read the conversation back
+$ whence file src/app.rs        # which sessions changed this, and why
+$ whence --harness codex ...    # narrow to one agent
+```
+
+## Why it is not a `grep` over `~/.claude`
+
+The on-disk formats are undocumented event logs, and reading them naively gives
+wrong answers rather than no answers:
+
+- A Claude Code response is spread over many lines that each repeat the same
+  `usage` block. Summing per line overstates output tokens by **93%**.
+- A Codex `token_count` event carries a running session total, not a delta.
+  Summing those overstates output tokens by **4268%**.
+- Under both, most records that look like the user are not: tool results, hook
+  output, `AGENTS.md`, `<system-reminder>` injections.
+- Codex records every prompt and reply *twice*, in two different streams.
+- The record that says which file an edit touched identifies itself, in both
+  harnesses, with an id that matches nothing else in the file.
+
+Each of these is documented, measured against a real corpus, and pinned by a
+test. See [CLAUDE.md](CLAUDE.md).
+
+## Design
+
+```
+source/{claude,codex} ──▶ model ──┬──▶ index + search (tantivy, jieba)
+ per-harness parsing              ├──▶ insights (corpus aggregates)
+                                  ├──▶ render ──▶ CLI + ratatui TUI
+                                  └──▶ MCP server (redacted)
+```
+
+`src/source/` is the only place that knows an on-disk format; `src/model.rs` is
+what every other surface reads. **Adding a harness is a directory, a `Harness`
+variant, and one line in a registry** — nothing else in the tree changes.
+
+Chinese transcripts are a first-class case: text is tokenized with jieba, and
+fuzzy matching dispatches on script, because CJK needs substring matching where
+Latin needs edit distance.
+
+Tool *results* are deliberately never indexed. They are most of the corpus by
+volume and they are where pasted secrets live.
+
+## Status
+
+Working: `sources`, `inspect`, `stats`, `index`, search, `file`, `show`, over
+Claude Code and Codex. 974 sessions read in 0.2s; a cold index of 722 MB takes
+0.4s and a warm refresh 0.13s.
+
+Being ported from the previous single-harness version: the TUI, the MCP server,
+insights, redaction and shell completions.

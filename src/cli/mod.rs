@@ -3,12 +3,15 @@
 //! `main` stays thin: this module owns the argument shapes and the dispatch,
 //! and each command owns its own output.
 
+mod index;
 mod inspect;
 mod report;
+mod search;
+mod show;
 mod stats;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand, ValueHint};
+use clap::{Args, Parser, Subcommand, ValueHint};
 use std::path::PathBuf;
 use whence::model::Harness;
 use whence::source::{self, Root, Transcript};
@@ -17,18 +20,74 @@ use whence::source::{self, Root, Transcript};
 #[command(
     name = "whence",
     version,
-    about = "Search and replay your coding agents' history"
+    about = "Search and replay your coding agents' history",
+    // `whence <words>` searches. Everything else is a named subcommand.
+    args_conflicts_with_subcommands = true
 )]
 pub struct Cli {
     /// Transcript root. Defaults to every harness installed here; the harness of
     /// a file under an explicit root is worked out by reading it.
     #[arg(long, global = true, value_hint = ValueHint::DirPath)]
     root: Option<PathBuf>,
-    /// Only this harness. Repeatable.
+    /// Only this harness. Repeatable: `--harness claude --harness codex`.
     #[arg(long, global = true, value_name = "NAME")]
     harness: Vec<Harness>,
+    /// Index location (default: ~/.cache/whence/index)
+    #[arg(long, global = true, value_hint = ValueHint::DirPath)]
+    index: Option<PathBuf>,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
+    #[command(flatten)]
+    search: SearchArgs,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct SearchArgs {
+    /// Words to search for. Supports `+must`, `-not` and `"phrases"`.
+    query: Vec<String>,
+    /// Only this project; matched on path segments, e.g. `rtrade`.
+    #[arg(long)]
+    project: Option<String>,
+    /// One of prompt, reply, think, edit.
+    #[arg(long, value_parser = ["prompt", "reply", "think", "edit"])]
+    kind: Option<String>,
+    /// Only turns that called this tool, e.g. `Bash`.
+    #[arg(long)]
+    tool: Option<String>,
+    /// Only since a date (2026-08-01) or an age (30d).
+    #[arg(long)]
+    since: Option<String>,
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+    /// Match loosely from the start, rather than only when nothing matched.
+    #[arg(long, conflicts_with = "exact")]
+    fuzzy: bool,
+    /// Never relax the query, even when it finds nothing.
+    #[arg(long)]
+    exact: bool,
+    /// Do not refresh the index before searching.
+    #[arg(long)]
+    no_refresh: bool,
+}
+
+impl SearchArgs {
+    fn into_query(self, harness: Vec<Harness>) -> Result<whence::search::Query> {
+        use whence::search::{self, Fuzzy};
+        Ok(search::Query {
+            text: self.query.join(" "),
+            harness,
+            project: self.project,
+            kind: self.kind.as_deref().map(search::parse_kind).transpose()?,
+            tool: self.tool,
+            since: self.since.as_deref().map(search::parse_since).transpose()?,
+            limit: self.limit,
+            fuzzy: match (self.fuzzy, self.exact) {
+                (true, _) => Fuzzy::Always,
+                (_, true) => Fuzzy::Never,
+                _ => Fuzzy::Auto,
+            },
+        })
+    }
 }
 
 #[derive(Subcommand)]
@@ -45,23 +104,88 @@ enum Command {
     },
     /// Summarize the whole corpus, across every harness.
     Stats,
+    /// Build or refresh the search index. Unchanged transcripts are not re-read.
+    Index {
+        /// Re-read every transcript instead of only what changed.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Search prompts, replies and thinking. The same as `whence <words>`,
+    /// spelled out for when a word collides with a subcommand name.
+    Search {
+        #[command(flatten)]
+        args: SearchArgs,
+    },
+    /// Which sessions changed a file, and why.
+    File {
+        /// Path or path suffix, e.g. `src/normalize.rs`.
+        #[arg(value_hint = ValueHint::AnyPath)]
+        path: String,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Do not refresh the index first.
+        #[arg(long)]
+        no_refresh: bool,
+    },
+    /// Read a conversation a search pointed at: `whence show 641a2ec6#2`.
+    Show {
+        /// Session id prefix, optionally with the turn: `641a2ec6` or `641a2ec6#2`.
+        target: String,
+        /// Also print this many turns after the one named.
+        #[arg(short = 'A', long, default_value_t = 0)]
+        after: usize,
+        /// Include the agent's thinking, where the transcript kept any.
+        #[arg(long)]
+        thinking: bool,
+    },
 }
 
 impl Cli {
-    pub fn run(self) -> Result<()> {
-        match self.command {
+    pub fn run(mut self) -> Result<()> {
+        let Some(command) = self.command.take() else {
+            // No subcommand: the bare words are the query.
+            if self.search.query.is_empty() {
+                use clap::CommandFactory;
+                Cli::command().print_help()?;
+                println!();
+                return Ok(());
+            }
+            return self.run_search(self.search.clone());
+        };
+        match command {
             Command::Sources => stats::sources(&self.roots()?),
             Command::Inspect { file, turns } => inspect::run(&file, turns),
             Command::Stats => stats::run(&self.transcripts()?),
+            Command::Index { force } => index::build(&self, force),
+            Command::Search { ref args } => self.run_search(args.clone()),
+            Command::File {
+                ref path,
+                limit,
+                no_refresh,
+            } => {
+                let index = index::for_query(&self, no_refresh)?;
+                search::file_history(&index, path, limit)
+            }
+            Command::Show {
+                ref target,
+                after,
+                thinking,
+            } => show::run(&self.transcripts()?, target, after, thinking),
         }
+    }
+
+    fn run_search(&self, args: SearchArgs) -> Result<()> {
+        let no_refresh = args.no_refresh;
+        let query = args.into_query(self.harness.clone())?;
+        let index = index::for_query(self, no_refresh)?;
+        search::search(&index, &query)
     }
 
     /// The roots to read, after `--root` and `--harness` are applied.
     fn roots(&self) -> Result<Vec<Root>> {
         let mut roots = match &self.root {
-            // An explicit root has no harness attached to it; `transcripts`
-            // sniffs the files instead. Represented here as one root per
-            // harness over the same directory.
+            // An explicit root has no harness attached to it, so it stands in
+            // for one root per harness; `transcripts` sniffs the files.
             Some(path) => {
                 anyhow::ensure!(path.is_dir(), "{} is not a directory", path.display());
                 Harness::ALL
@@ -104,6 +228,13 @@ impl Cli {
         }
         anyhow::ensure!(!found.is_empty(), "no transcripts found under those roots");
         Ok(found)
+    }
+
+    fn index_dir(&self) -> Result<PathBuf> {
+        self.index
+            .clone()
+            .or_else(whence::index::default_index_dir)
+            .ok_or_else(|| anyhow::anyhow!("could not determine an index location; pass --index"))
     }
 }
 

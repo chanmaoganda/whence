@@ -182,6 +182,35 @@ impl ToolCall {
     }
 }
 
+/// Eight characters of a session id that actually distinguish it.
+///
+/// Not simply the first eight: the harnesses use different uuid versions and
+/// the entropy is in different places. Claude Code uses v4, which is random
+/// throughout, so any eight characters will do. Codex uses v7, whose leading 48
+/// bits are a millisecond timestamp — two sessions started seconds apart share
+/// their first eight characters, and on the reference corpus half of them
+/// collide. For those, the distinguishing part is at the end.
+///
+/// Keyed on the uuid version nibble rather than on the harness, so a harness
+/// added later gets the right answer without anyone remembering this.
+pub fn short_id(id: &str) -> &str {
+    if is_time_ordered_uuid(id) {
+        return id.get(id.len() - 8..).unwrap_or(id);
+    }
+    id.get(..8).unwrap_or(id)
+}
+
+/// A uuid whose version nibble marks it time-ordered (v7, and v1/v6 which lead
+/// with a timestamp too).
+fn is_time_ordered_uuid(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    // `xxxxxxxx-xxxx-Vxxx-xxxx-xxxxxxxxxxxx` — the version is at index 14.
+    bytes.len() == 36
+        && bytes[8] == b'-'
+        && bytes[13] == b'-'
+        && matches!(bytes[14], b'1' | b'6' | b'7')
+}
+
 /// The first non-blank line, cut to `max` characters.
 pub fn first_line(text: &str, max: usize) -> String {
     let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
@@ -225,10 +254,9 @@ impl UsageTotals {
 }
 
 impl Session {
-    /// The first eight characters of the id — what search results print and
-    /// what you type back at `whence show`.
+    /// The short id search results print and you type back at `whence show`.
     pub fn short_id(&self) -> &str {
-        self.id.get(..8).unwrap_or(&self.id)
+        short_id(&self.id)
     }
 
     pub fn steps(&self) -> impl Iterator<Item = &Step> {
@@ -273,6 +301,27 @@ mod tests {
         }
         assert_eq!("CLAUDE".parse::<Harness>().unwrap(), Harness::Claude);
         assert!("gemini".parse::<Harness>().is_err());
+    }
+
+    #[test]
+    fn short_id_distinguishes_time_ordered_uuids() {
+        // Two real Codex (v7) ids from sessions started a second apart: they
+        // share their first eight characters, so the tail is what identifies them.
+        let a = "019f4eca-3588-7fc0-9b71-5a240f6025b7";
+        let b = "019f4eca-901b-7d91-9f65-cda91498aa04";
+        assert_eq!(&a[..8], &b[..8], "the fixture must actually collide");
+        assert_ne!(short_id(a), short_id(b));
+        assert_eq!(short_id(a), "5a240f6025b7"[4..].to_string());
+
+        // A Claude (v4) id keeps the familiar leading form.
+        let c = "05fd3fbf-c446-49e9-8d96-04f267693991";
+        assert_eq!(short_id(c), "05fd3fbf");
+    }
+
+    #[test]
+    fn short_id_tolerates_ids_that_are_not_uuids() {
+        assert_eq!(short_id("abc"), "abc");
+        assert_eq!(short_id(""), "");
     }
 
     #[test]

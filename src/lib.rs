@@ -16,6 +16,8 @@
 //! reads. A harness that changes its format touches one directory; a new
 //! harness *adds* one.
 
+pub mod index;
 pub mod model;
 pub mod render;
+pub mod search;
 pub mod source;

@@ -178,6 +178,26 @@ pub fn sniff_file(path: &Path) -> Option<Harness> {
         .map(|source| source.harness())
 }
 
+/// Transcripts whose filename contains `prefix`.
+///
+/// Session ids are uuids and results print only the first eight characters, so
+/// that prefix is what you have in hand when you want to go read a conversation.
+/// Claude Code names a file for its session id; Codex embeds it in a longer
+/// name, so this matches anywhere in the stem rather than only at the start.
+pub fn by_session_prefix(transcripts: &[Transcript], prefix: &str) -> Vec<Transcript> {
+    let mut found: Vec<Transcript> = transcripts
+        .iter()
+        .filter(|t| {
+            t.path
+                .file_stem()
+                .is_some_and(|stem| stem.to_string_lossy().contains(prefix))
+        })
+        .cloned()
+        .collect();
+    found.sort_by(|a, b| a.path.cmp(&b.path));
+    found
+}
+
 /// Read one transcript whose harness is already known.
 pub fn normalize_with(harness: Harness, path: &Path) -> std::io::Result<(Session, ParseStats)> {
     let file = std::fs::File::open(path)?;
