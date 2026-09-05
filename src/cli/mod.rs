@@ -3,6 +3,7 @@
 //! `main` stays thin: this module owns the argument shapes and the dispatch,
 //! and each command owns its own output.
 
+mod completions;
 mod index;
 mod inspect;
 mod report;
@@ -127,6 +128,14 @@ enum Command {
         #[arg(long)]
         no_refresh: bool,
     },
+    /// Print a shell completion script: `whence completions fish`.
+    Completions {
+        /// bash, zsh or fish. Detected from $SHELL when omitted.
+        shell: Option<completions::Shell>,
+        /// Write the script where the shell already looks, instead of stdout.
+        #[arg(long)]
+        install: bool,
+    },
     /// Read a conversation a search pointed at: `whence show 641a2ec6#2`.
     Show {
         /// Session id prefix, optionally with the turn: `641a2ec6` or `641a2ec6#2`.
@@ -166,6 +175,7 @@ impl Cli {
                 let index = index::for_query(&self, no_refresh)?;
                 search::file_history(&index, path, limit)
             }
+            Command::Completions { shell, install } => completions::run(shell, install),
             Command::Show {
                 ref target,
                 after,
