@@ -105,13 +105,10 @@ pub struct SearchIndex {
     pub(crate) fields: Fields,
 }
 
-/// `$XDG_CACHE_HOME/whence/index`, falling back to `~/.cache/whence/index`.
+/// `$XDG_CACHE_HOME/whence/index`, falling back to `~/.cache/whence/index` —
+/// and to `%LOCALAPPDATA%\whence\index` on Windows. See [`crate::home`].
 pub fn default_index_dir() -> Option<PathBuf> {
-    let base = match std::env::var_os("XDG_CACHE_HOME") {
-        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
-        _ => PathBuf::from(std::env::var_os("HOME")?).join(".cache"),
-    };
-    Some(base.join("whence").join("index"))
+    Some(crate::home::cache()?.join("whence").join("index"))
 }
 
 impl SearchIndex {

@@ -68,12 +68,11 @@ impl Shell {
 
 /// `$VAR` if it names a path, else `$HOME/<fallback>`.
 fn xdg_dir(var: &str, fallback: &str) -> Result<PathBuf> {
-    match std::env::var_os(var) {
-        Some(dir) if !dir.is_empty() => Ok(PathBuf::from(dir)),
-        _ => Ok(PathBuf::from(
-            std::env::var_os("HOME").context("neither $HOME nor $XDG_* is set")?,
-        )
-        .join(fallback)),
+    match whence::home::non_empty(var) {
+        Some(dir) => Ok(PathBuf::from(dir)),
+        None => Ok(whence::home::dir()
+            .context("neither $HOME nor $XDG_* is set")?
+            .join(fallback)),
     }
 }
 

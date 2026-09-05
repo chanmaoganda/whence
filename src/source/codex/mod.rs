@@ -33,11 +33,7 @@ impl Source for Codex {
         if let Some(dir) = std::env::var_os("CODEX_HOME") {
             return Some(PathBuf::from(dir).join("sessions"));
         }
-        Some(
-            PathBuf::from(std::env::var_os("HOME")?)
-                .join(".codex")
-                .join("sessions"),
-        )
+        Some(crate::home::dir()?.join(".codex").join("sessions"))
     }
 
     fn transcripts(&self, root: &Path) -> Vec<PathBuf> {

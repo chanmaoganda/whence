@@ -28,11 +28,7 @@ impl Source for ClaudeCode {
         if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
             return Some(PathBuf::from(dir).join("projects"));
         }
-        Some(
-            PathBuf::from(std::env::var_os("HOME")?)
-                .join(".claude")
-                .join("projects"),
-        )
+        Some(crate::home::dir()?.join(".claude").join("projects"))
     }
 
     /// Every `.jsonl` under the root, including the subagent and workflow
