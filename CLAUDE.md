@@ -154,7 +154,10 @@ ignored, and a corrupt line must never abort a file.
   because the results list can only say *that* something matched. Latin marks
   land on word boundaries — `rs`, cut from `src/model.rs`, is also inside
   `first` and `parse` — while CJK stays a substring, since jieba cuts finer than
-  anyone types.
+  anyone types. A mark is bold **and** underlined, in the terminal and in the
+  TUI both: half of a transcript is bold already, so bold alone is not a mark.
+  The reader adds reverse video on top, because there a match has to be found
+  while scrolling past it rather than read.
 - Excerpts are located by searching the stored body for the query's own tokens,
   not with tantivy's `SnippetGenerator`, which re-tokenizes every hit it is
   shown: at the TUI's limit of 200 that was 47 ms of jieba per keystroke on a

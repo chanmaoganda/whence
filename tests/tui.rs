@@ -370,6 +370,32 @@ fn the_reader_opens_on_the_turn_the_hit_came_from() {
     assert!(screen.contains("aaaaaaaa"), "the header names the session");
 }
 
+/// Bold alone does not catch the eye in a transcript that is already half code
+/// and half emphasis, so a matched word is underlined too — in the excerpt as
+/// well as in the reader.
+#[test]
+fn a_matched_word_is_underlined_where_it_is_shown() {
+    let (_dir, mut app) = app();
+    type_in(&mut app, "tantivy");
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
+    terminal
+        .draw(|frame| ui::draw(frame, &mut app))
+        .expect("draw");
+    let buffer = terminal.backend().buffer().clone();
+
+    let underlined: String = (0..buffer.area.height)
+        .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
+        .filter(|&at| buffer[at].modifier.contains(Modifier::UNDERLINED))
+        .map(|at| buffer[at].symbol().to_string())
+        .collect();
+
+    assert!(
+        underlined.to_lowercase().contains("tantivy"),
+        "the matched word is underlined, not only bold: {underlined:?}"
+    );
+}
+
 /// Why *this* conversation came back. A transcript is thousands of lines and
 /// the reason you opened it is one sentence inside it, so the words that
 /// matched are picked out wherever they appear — the results list can only say

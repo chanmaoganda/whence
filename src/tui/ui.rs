@@ -26,6 +26,14 @@ use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, Padding, Para
 use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+/// How a matched word is marked, wherever one is shown. Bold alone does not
+/// catch the eye in a wall of prose — half of a code-heavy transcript is bold
+/// already — so the mark is bold *and* underlined, which no rendered markdown
+/// uses.
+fn marked(base: Style) -> Style {
+    base.bold().underlined().not_dim()
+}
+
 /// The selected row's background. An indexed colour rather than an RGB one, so
 /// it comes from the terminal's own palette and stays legible under whichever
 /// theme the user actually has.
@@ -253,7 +261,7 @@ fn excerpt_lines(excerpt: &Excerpt, width: usize) -> Vec<Line<'static>> {
         .enumerate()
         .map(|(i, run)| {
             let mut spans = vec![Span::raw("  ")];
-            spans.extend(runs_to_spans(&run, Style::new().dim()));
+            spans.extend(runs_to_spans(&run, Style::new().dim(), marked));
             if clipped && i == last {
                 spans.push(Span::styled("…", Style::new().dim()));
             }
@@ -440,7 +448,7 @@ fn mark_span(span: Span<'static>, words: &[String]) -> Vec<Span<'static>> {
         }
         out.push(Span::styled(
             text[from..to].to_string(),
-            span.style.add_modifier(Modifier::REVERSED),
+            marked(span.style).add_modifier(Modifier::REVERSED),
         ));
         at = to;
     }
@@ -785,7 +793,7 @@ fn flow(
             if !lead.is_empty() {
                 out.push(Span::styled(lead.to_string(), marker));
             }
-            out.extend(runs_to_spans(&run, base));
+            out.extend(runs_to_spans(&run, base, style_of_strong));
             Line::from(out)
         })
         .collect()
@@ -896,29 +904,43 @@ fn flatten(spans: &[MdSpan]) -> Vec<(char, Emphasis)> {
 }
 
 /// Back from characters to as few styled spans as the run allows.
-fn runs_to_spans(run: &[(char, Emphasis)], base: Style) -> Vec<Span<'static>> {
+/// `strong` is how [`Emphasis::Strong`] is drawn, because the two callers mean
+/// different things by it: in rendered markdown it is the author's own bold, and
+/// in an excerpt it is the word you searched for.
+fn runs_to_spans(
+    run: &[(char, Emphasis)],
+    base: Style,
+    strong: fn(Style) -> Style,
+) -> Vec<Span<'static>> {
     let mut out: Vec<Span<'static>> = Vec::new();
     let mut text = String::new();
     let mut current: Option<Emphasis> = None;
     for &(ch, em) in run {
         if current != Some(em) {
             if let Some(was) = current.take() {
-                out.push(Span::styled(std::mem::take(&mut text), style_of(was, base)));
+                out.push(Span::styled(
+                    std::mem::take(&mut text),
+                    style_of(was, base, strong),
+                ));
             }
             current = Some(em);
         }
         text.push(ch);
     }
     if let Some(em) = current {
-        out.push(Span::styled(text, style_of(em, base)));
+        out.push(Span::styled(text, style_of(em, base, strong)));
     }
     out
 }
 
-fn style_of(emphasis: Emphasis, base: Style) -> Style {
+fn style_of_strong(base: Style) -> Style {
+    base.bold().not_dim()
+}
+
+fn style_of(emphasis: Emphasis, base: Style, strong: fn(Style) -> Style) -> Style {
     match emphasis {
         Emphasis::None => base,
-        Emphasis::Strong => base.bold().not_dim(),
+        Emphasis::Strong => strong(base),
         Emphasis::Emph => base.italic(),
         Emphasis::Strike => base.crossed_out(),
         Emphasis::Code => base.fg(Color::Green),

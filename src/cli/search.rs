@@ -102,8 +102,11 @@ fn hit_location(hit: &Hit) -> String {
 }
 
 fn excerpt(excerpt: &Excerpt) -> String {
+    // Bold and underlined. Bold alone disappears into a transcript that is half
+    // code and half emphasis already, and the whole point of the mark is to be
+    // found without reading.
     excerpt
-        .render("\u{1b}[1m", "\u{1b}[0m")
+        .render("\u{1b}[1;4m", "\u{1b}[0m")
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
