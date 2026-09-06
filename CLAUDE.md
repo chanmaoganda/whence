@@ -53,6 +53,19 @@ harness adds one.
   overlaps a compound word with its pieces and only a real offset can say so.
 - `whence show` and `whence inspect` go through `source` directly, not the
   index, so reading a session back never depends on the index being current.
+- **`Source::resume` is the one method that hands a transcript back.** The id
+  every surface prints is eight characters, which names a session to whence and
+  to nothing else; `claude --resume` and `codex resume` want the whole uuid, and
+  want it in the directory the session ran in, because that is how both
+  harnesses find one. `whence show` prints the command; the reader carries it on
+  the right of its header, because reading is where you decide to go back; and
+  quitting the TUI leaves it under the `whence show` pointer. The header gives
+  up the `cd` first when the line runs out of room (the project is named two
+  spans to its left) and then the title (the results list already showed it) —
+  the id never shortens, since that is the half you cannot reconstruct. A Claude
+  subagent resumes as the conversation that spawned it — the directory its
+  `subagents/` folder sits in — because a subagent was never a session you drove
+  and `--resume` will not take its id.
 - `src/tui/` is the browser. `app.rs` is the state machine and never mentions a
   terminal, so every key is testable; `ui.rs` owns layout, including `wrap` —
   the function `render`'s docs point at. It measures display width and breaks

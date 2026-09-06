@@ -8,7 +8,7 @@
 use crate::index::SearchIndex;
 use crate::model::{short_id, Harness, Session};
 use crate::search::{Hit, Query};
-use crate::source;
+use crate::source::{self, Resumable, Resume};
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::Line;
 use ratatui::widgets::ListState;
@@ -163,6 +163,27 @@ impl App {
         }
         let hit = self.selected()?;
         Some(format!("{}#{}", short_id(&hit.session), hit.turn))
+    }
+
+    /// How to reopen whatever is on screen in the agent that had it.
+    ///
+    /// The one thing the short id cannot do: it names a conversation to whence
+    /// and to nothing else, and finding the conversation is usually the half of
+    /// the job you did not want. Built from the hit when nothing is open, so a
+    /// row you only selected is still a session you can go back to.
+    pub fn resume_hint(&self) -> Option<Resume> {
+        if let Some(reading) = &self.reading {
+            return reading.resume();
+        }
+        let hit = self.selected()?;
+        source::resume(
+            hit.harness.parse().ok()?,
+            Resumable {
+                id: &hit.session,
+                project: &hit.project,
+                path: Path::new(&hit.source),
+            },
+        )
     }
 
     /// Which harnesses the current filter admits, in the form a [`Query`] wants.
@@ -655,6 +676,15 @@ pub struct Laid {
 }
 
 impl Reading {
+    /// How to pick this conversation back up in the agent that had it. The
+    /// reader is where you decide to go back, so it is the reader that has to
+    /// carry the whole id — the eight characters in its header name this
+    /// session to whence and to nothing else.
+    pub fn resume(&self) -> Option<Resume> {
+        let session: &Session = &self.session;
+        source::resume(session.harness, Resumable::from(session))
+    }
+
     pub fn new(session: Rc<Session>, turn: usize, words: Vec<String>) -> Self {
         Reading {
             session,

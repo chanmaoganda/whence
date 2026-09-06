@@ -11,7 +11,7 @@
 pub mod normalize;
 pub mod raw;
 
-use super::{ParseStats, Source};
+use super::{ParseStats, Resumable, Resume, Source};
 use crate::model::{Harness, Session};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -77,6 +77,40 @@ impl Source for ClaudeCode {
     ) -> (Session, ParseStats) {
         normalize::normalize(path, lines)
     }
+
+    /// `claude --resume <uuid>`, run where the session ran: Claude Code keeps
+    /// transcripts per project directory and looks for the id only in the one
+    /// belonging to the current working directory.
+    ///
+    /// A subagent is not a conversation `--resume` will take — it was never a
+    /// session you drove — so what comes back is the conversation that spawned
+    /// it, which is the directory its `subagents/` folder sits in. That is the
+    /// one you would actually want to walk back into anyway.
+    fn resume(&self, session: Resumable<'_>) -> Option<Resume> {
+        let spawned_by = spawning_session(session.path);
+        let id = spawned_by.as_deref().unwrap_or(session.id);
+        Some(Resume {
+            command: format!("claude --resume {id}"),
+            project: session.project.to_string(),
+        })
+    }
+}
+
+/// The session a subagent transcript was spawned by, from
+/// `<project>/<session-uuid>/subagents/<subagent-uuid>.jsonl`. `None` for a
+/// conversation that is its own session.
+///
+/// A loop rather than two `parent()` calls: a subagent can spawn a subagent,
+/// and only the outermost id is one Claude Code will reopen.
+fn spawning_session(path: &Path) -> Option<String> {
+    let mut dir = path.parent()?;
+    let mut found = None;
+    while dir.file_name().is_some_and(|name| name == "subagents") {
+        let session = dir.parent()?;
+        found = Some(session.file_name()?.to_string_lossy().into_owned());
+        dir = session.parent()?;
+    }
+    found
 }
 
 /// Transcripts whose filename starts with `prefix`. Session ids are uuids and

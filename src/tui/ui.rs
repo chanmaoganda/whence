@@ -430,7 +430,7 @@ fn read_view(frame: &mut Frame, app: &mut App) {
     };
     reading.lay(inner.width, inner.height, show);
 
-    frame.render_widget(read_header(reading), top);
+    frame.render_widget(read_header(reading, top.width), top);
     frame.render_widget(body_paragraph(reading), inner);
     frame.render_widget(
         keys(&[
@@ -452,15 +452,43 @@ fn read_view(frame: &mut Frame, app: &mut App) {
     );
 }
 
-fn read_header(reading: &Reading) -> Line<'static> {
+/// The reader's one header line: which conversation this is on the left, and
+/// what to type to walk back into it on the right.
+fn read_header(reading: &Reading, width: u16) -> Line<'static> {
     let session = &reading.session;
     let at = position_of(session, reading.turn).map_or(0, |i| i + 1);
-    let title = session
-        .title
-        .as_deref()
-        .map(|t| format!("  {}", first_line(t, 50)))
-        .unwrap_or_default();
-    Line::from(vec![
+    let titled = header_spans(session, at, true);
+
+    let Some(resume) = reading.resume() else {
+        return Line::from(titled);
+    };
+    // The command has the right of the line, and what gives way for it goes in
+    // order of what is least missed: the `cd` first, since the header names the
+    // project two spans to its left, and then the title, which the results list
+    // already showed. On a terminal too narrow for even the bare command,
+    // nothing — a clipped shell command is worse than none, and quitting still
+    // prints it in full.
+    let attempts = [
+        (titled.clone(), resume.pasteable()),
+        (titled.clone(), resume.command.clone()),
+        (header_spans(session, at, false), resume.command),
+    ];
+    for (mut spans, text) in attempts {
+        if let Some(pad) = room_at_the_right(&spans, &text, width) {
+            spans.push(Span::raw(" ".repeat(pad)));
+            spans.push(Span::styled(text, Style::new().fg(Color::DarkGray)));
+            return Line::from(spans);
+        }
+    }
+    Line::from(titled)
+}
+
+fn header_spans(session: &Session, at: usize, title: bool) -> Vec<Span<'static>> {
+    let title = match (title, session.title.as_deref()) {
+        (true, Some(t)) => format!("  {}", first_line(t, 50)),
+        _ => String::new(),
+    };
+    vec![
         Span::styled(
             format!(" {}", short_id(&session.id)),
             Style::new().fg(Color::Cyan),
@@ -475,7 +503,17 @@ fn read_header(reading: &Reading) -> Line<'static> {
             format!("  turn {at}/{}", session.turns.len()),
             Style::new().fg(Color::DarkGray),
         ),
-    ])
+    ]
+}
+
+/// Columns of whitespace that would set `text` against the right edge, or
+/// `None` when it will not fit with a gap wide enough to read as a separate
+/// thing rather than as more of the title.
+fn room_at_the_right(spans: &[Span<'static>], text: &str, width: u16) -> Option<usize> {
+    const GAP: usize = 3;
+    let used: usize = spans.iter().map(|s| s.content.width()).sum();
+    let pad = (width as usize).checked_sub(used + text.width() + 1)?;
+    (pad >= GAP).then_some(pad)
 }
 
 /// The visible slice of a laid-out conversation.

@@ -5,7 +5,7 @@
 
 use std::path::Path;
 use whence::model::{Harness, SessionKind};
-use whence::source;
+use whence::source::{self, Resumable};
 
 fn run(lines: &[&str]) -> whence::model::Session {
     let path = Path::new("/tmp/projects/-code-demo/abc123.jsonl");
@@ -158,6 +158,74 @@ fn subagent_transcripts_are_labelled() {
         SessionKind::Subagent {
             agent: "agent-abc".into()
         }
+    );
+}
+
+/// The way back out of whence: the whole id, in the directory Claude Code
+/// keeps that session under. Eight characters name a session here and nowhere
+/// else, and `--resume` looks only in the project it is run from.
+#[test]
+fn resumes_a_session_by_its_whole_id_in_its_own_project() {
+    let session = run(&[
+        r#"{"type":"user","sessionId":"s1","cwd":"/code/stock/rtrade","message":{"content":"hi"}}"#,
+    ]);
+    let command = source::resume(Harness::Claude, Resumable::from(&session))
+        .expect("resumable")
+        .pasteable();
+    assert_eq!(
+        command, "cd /code/stock/rtrade && claude --resume abc123",
+        "the id in full, run where the session ran"
+    );
+}
+
+/// A subagent was never a session you drove, so `--resume` will not take its
+/// id. The conversation that spawned it is the directory the `subagents/`
+/// folder sits in — and is what you wanted to reopen anyway.
+#[test]
+fn a_subagent_resumes_as_the_session_that_spawned_it() {
+    let parent = "0750255e-3156-45a3-9670-8501b4421ca0";
+    let path = format!("/tmp/projects/-code-demo/{parent}/subagents/agent-abc.jsonl");
+    let session = Resumable {
+        id: "agent-abc",
+        project: "/code/demo",
+        path: Path::new(&path),
+    };
+    assert_eq!(
+        source::resume(Harness::Claude, session)
+            .expect("resumable")
+            .pasteable(),
+        format!("cd /code/demo && claude --resume {parent}")
+    );
+
+    // A subagent of a subagent: only the outermost id is a session.
+    let nested = format!("/tmp/projects/-code-demo/{parent}/subagents/sub/subagents/deep.jsonl");
+    let session = Resumable {
+        id: "deep",
+        project: "/code/demo",
+        path: Path::new(&nested),
+    };
+    assert_eq!(
+        source::resume(Harness::Claude, session)
+            .expect("resumable")
+            .pasteable(),
+        format!("cd /code/demo && claude --resume {parent}")
+    );
+}
+
+/// A directory with a space in it is ordinary, and a command you cannot paste
+/// is not an answer.
+#[test]
+fn quotes_a_project_the_shell_would_cut_up() {
+    let session = Resumable {
+        id: "abc123",
+        project: "/Users/me/My Code/whence",
+        path: Path::new("/tmp/projects/x/abc123.jsonl"),
+    };
+    assert_eq!(
+        source::resume(Harness::Claude, session)
+            .expect("resumable")
+            .pasteable(),
+        "cd '/Users/me/My Code/whence' && claude --resume abc123"
     );
 }
 

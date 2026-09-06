@@ -20,6 +20,7 @@
 //!   not known, and [`sniff`]s each file's first lines. One short read per file.
 
 use crate::model::{Harness, Session};
+use std::fmt;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
@@ -46,6 +47,66 @@ pub struct Transcript {
 pub struct Root {
     pub harness: Harness,
     pub path: PathBuf,
+}
+
+/// A session, in the terms a harness needs in order to open it again.
+///
+/// Borrowed rather than a whole [`Session`] because the results list has never
+/// parsed one — a [`Hit`](crate::search::Hit) carries these three facts and
+/// nothing more, and a result is exactly where you decide to go back.
+#[derive(Debug, Clone, Copy)]
+pub struct Resumable<'a> {
+    /// The whole id. Eight characters find a session *here*; a harness wants
+    /// all of it.
+    pub id: &'a str,
+    /// The directory the session ran in. Both harnesses look for a session
+    /// under the project it belongs to, so the id alone finds nothing from
+    /// anywhere else.
+    pub project: &'a str,
+    /// Where the transcript sits. It is the path, not the contents, that says
+    /// a file is something other than a conversation you can walk back into.
+    pub path: &'a Path,
+}
+
+/// How to pick a conversation back up: the harness's own command, and the
+/// directory it has to run in.
+///
+/// Two fields rather than one string because the surfaces need different halves
+/// of it. A shell needs the whole thing; the reader already names the project
+/// in its header, so when the line is short the `cd` is the part to drop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resume {
+    /// `claude --resume <uuid>` — the id in full, always.
+    pub command: String,
+    /// The directory the session ran in; empty when the transcript never said.
+    pub project: String,
+}
+
+impl Resume {
+    /// The command spelled so it can be pasted anywhere: run in the session's
+    /// own directory, because that is where its harness keeps it.
+    pub fn pasteable(&self) -> String {
+        if self.project.is_empty() {
+            return self.command.clone();
+        }
+        format!("cd {} && {}", shell_quote(&self.project), self.command)
+    }
+}
+
+impl fmt::Display for Resume {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.pasteable())
+    }
+}
+
+impl<'a> From<&'a Session> for Resumable<'a> {
+    fn from(session: &'a Session) -> Self {
+        Resumable {
+            id: &session.id,
+            project: &session.project,
+            path: &session.source_path,
+        }
+    }
 }
 
 /// Reading one agent's transcripts.
@@ -81,6 +142,16 @@ pub trait Source: Send + Sync {
         path: &Path,
         lines: &mut dyn Iterator<Item = String>,
     ) -> (Session, ParseStats);
+
+    /// What to type to pick this conversation back up in the agent that had
+    /// it, or `None` when the harness will not take this transcript back.
+    ///
+    /// The other direction from everything else in this module: the rest reads
+    /// a harness's files, and this hands one back. It spells the id in full and
+    /// in the session's own directory, because the eight characters every
+    /// surface prints are for finding a session again *in whence* — pasted at
+    /// a shell they resume nothing.
+    fn resume(&self, session: Resumable<'_>) -> Option<Resume>;
 }
 
 static CLAUDE: claude::ClaudeCode = claude::ClaudeCode;
@@ -93,6 +164,22 @@ pub fn get(harness: Harness) -> &'static dyn Source {
     ALL.into_iter()
         .find(|s| s.harness() == harness)
         .expect("every Harness variant has an adapter in ALL")
+}
+
+/// How to resume a session in the harness that wrote it — see
+/// [`Source::resume`].
+pub fn resume(harness: Harness, session: Resumable<'_>) -> Option<Resume> {
+    get(harness).resume(session)
+}
+
+/// Quote a path the shell would otherwise cut up. Directories with spaces in
+/// them are ordinary, and a command you cannot paste is not an answer.
+fn shell_quote(path: &str) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "._-+=/:@~".contains(c);
+    if path.chars().all(plain) {
+        return path.to_string();
+    }
+    format!("'{}'", path.replace('\'', r"'\''"))
 }
 
 /// Every harness that is actually installed here, with the directory its

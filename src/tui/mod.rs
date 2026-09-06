@@ -30,16 +30,30 @@ pub mod ui;
 
 pub use app::{App, Group, Row, Show, Tree, View};
 
+use crate::source::Resume;
 use anyhow::Result;
 use ratatui::crossterm::event::{self, Event};
 use std::time::Duration;
 
+/// What the shell is left holding when the browser exits.
+///
+/// Two commands, because there are two things you leave to do: read the same
+/// passage again here, or pick the conversation itself back up in the agent
+/// that had it.
+#[derive(Debug, Clone)]
+pub struct Exit {
+    /// A `whence show` target — short id and turn.
+    pub show: String,
+    /// The harness's own resume command. `None` when the harness will not
+    /// reopen this transcript.
+    pub resume: Option<Resume>,
+}
+
 /// Run the browser until the user quits.
 ///
-/// Returns the `whence show` target of whatever they were last looking at, so
-/// the shell they came back to has a pointer into the corpus rather than
-/// nothing at all.
-pub fn run(mut app: App) -> Result<Option<String>> {
+/// Returns whatever they were last looking at, so the shell they came back to
+/// has a pointer into the corpus rather than nothing at all.
+pub fn run(mut app: App) -> Result<Option<Exit>> {
     ratatui::run(|terminal| {
         while !app.quit {
             // Whatever the last batch of keys asked for — a new search, a
@@ -55,7 +69,10 @@ pub fn run(mut app: App) -> Result<Option<String>> {
                 app.handle(event::read()?);
             }
         }
-        Ok(app.exit_hint())
+        Ok(app.exit_hint().map(|show| Exit {
+            show,
+            resume: app.resume_hint(),
+        }))
     })
 }
 

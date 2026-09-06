@@ -12,7 +12,7 @@
 pub mod normalize;
 pub mod raw;
 
-use super::{ParseStats, Source};
+use super::{ParseStats, Resumable, Resume, Source};
 use crate::model::{Harness, Session};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -78,5 +78,16 @@ impl Source for Codex {
         lines: &mut dyn Iterator<Item = String>,
     ) -> (Session, ParseStats) {
         normalize::normalize(path, lines)
+    }
+
+    /// `codex resume <uuid>`, run where the session ran. The rollout files are
+    /// dated rather than per-project, so the id alone does find the session —
+    /// but it would reopen it against whatever directory you happened to be
+    /// standing in, which is not the conversation you were reading.
+    fn resume(&self, session: Resumable<'_>) -> Option<Resume> {
+        Some(Resume {
+            command: format!("codex resume {}", session.id),
+            project: session.project.to_string(),
+        })
     }
 }

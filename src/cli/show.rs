@@ -8,7 +8,7 @@ use super::report::when;
 use anyhow::{Context, Result};
 use whence::model::{first_line, SessionKind, Turn};
 use whence::render::{self, Block};
-use whence::source::{self, Transcript};
+use whence::source::{self, Resumable, Transcript};
 
 pub fn run(transcripts: &[Transcript], target: &str, after: usize, thinking: bool) -> Result<()> {
     let (prefix, wanted) = match target.split_once('#') {
@@ -52,6 +52,12 @@ pub fn run(transcripts: &[Transcript], target: &str, after: usize, thinking: boo
         println!("kind     subagent ({agent})");
     }
     println!("source   {}", transcript.path.display());
+    // The way back out: the whole id, in the directory its harness keeps it
+    // under. The eight characters every other line prints identify a session
+    // here and nowhere else.
+    if let Some(resume) = source::resume(session.harness, Resumable::from(&session)) {
+        println!("resume   {}", resume.pasteable());
+    }
     println!();
 
     let Some(wanted) = wanted else {

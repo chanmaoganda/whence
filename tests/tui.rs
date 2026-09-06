@@ -138,10 +138,14 @@ const SESSION: &str = "aaaaaaaa-1111-4111-8111-111111111111";
 /// this corpus asks the same question of the same repository for weeks, and a
 /// flat list of matches is unreadable exactly there.
 const OTHER: &str = "bbbbbbbb-2222-4222-8222-222222222222";
+/// Claude Code names some conversations and not others. The one with a title
+/// is what the reader header has to give up when the line runs out of room.
+const TITLE: &str = "用 tantivy 重建索引";
 
 fn transcript() -> Vec<String> {
     let head = format!(r#""sessionId":"{SESSION}","cwd":"/code/demo""#);
     vec![
+        format!(r#"{{"type":"ai-title",{head},"aiTitle":"{TITLE}"}}"#),
         format!(
             r#"{{"type":"user",{head},"timestamp":"2026-08-08T05:20:00Z","message":{{"content":"用 tantivy 重建索引"}}}}"#
         ),
@@ -482,6 +486,41 @@ fn ctrl_c_quits_from_anywhere() {
     );
 }
 
+/// The eight characters on screen name a conversation to whence and to nothing
+/// else. Leaving has to hand back the id in full, or the conversation you just
+/// found is one you cannot walk back into.
+#[test]
+fn quitting_leaves_the_command_that_reopens_the_conversation() {
+    let (_dir, mut app) = app();
+
+    // From the results list, with nothing opened.
+    let hit = app.selected().expect("a selected row").clone();
+    let resume = app.resume_hint().expect("a hit can be resumed").pasteable();
+    assert_eq!(
+        resume,
+        format!("cd {} && claude --resume {}", hit.project, hit.session),
+        "the whole id, in the project the session ran in"
+    );
+    assert!(
+        resume.contains(SESSION) || resume.contains(OTHER),
+        "{resume} carries a real session id"
+    );
+
+    // And from inside the conversation, which is where you decide to go back.
+    press(&mut app, KeyCode::Enter);
+    app.settle();
+    let reading = app.reading.as_ref().expect("a conversation is open");
+    assert_eq!(
+        app.resume_hint()
+            .expect("an open session can be resumed")
+            .pasteable(),
+        format!(
+            "cd {} && claude --resume {}",
+            reading.session.project, reading.session.id
+        )
+    );
+}
+
 // ---- what actually lands on the screen -----------------------------------
 
 fn screen(app: &mut App, width: u16, height: u16) -> String {
@@ -548,6 +587,73 @@ fn the_reader_opens_on_the_turn_the_hit_came_from() {
         "the reader lands on the matching turn:\n{screen}"
     );
     assert!(screen.contains("aaaaaaaa"), "the header names the session");
+}
+
+/// The reader is where you decide to go back, so the command that takes you
+/// there is on that screen — not only in what the shell is left with. The
+/// eight characters in the header name the session to whence and to nothing
+/// else.
+#[test]
+fn the_reader_header_carries_the_command_that_reopens_the_session() {
+    let (_dir, mut app) = app();
+    press(&mut app, KeyCode::Enter);
+    app.settle();
+    let resume = app.resume_hint().expect("an open session can be resumed");
+    let (whole, bare) = (resume.pasteable(), resume.command.clone());
+    assert!(bare.contains(SESSION) || bare.contains(OTHER), "{bare}");
+
+    let wide = screen(&mut app, 160, 24);
+    let header = wide.lines().next().expect("a header");
+    assert!(
+        header.contains(&whole),
+        "the whole command, where there is room for it:\n{header}"
+    );
+
+    // Narrower: the `cd` goes first, because the header names the project two
+    // spans to its left anyway.
+    let narrow = screen(&mut app, 110, 24);
+    let header = narrow.lines().next().expect("a header");
+    assert!(
+        header.contains(&bare),
+        "the id stays whole even when the line does not fit:\n{header}"
+    );
+    assert!(!header.contains(&whole), "{header}");
+
+    // Narrower still: no room, and a clipped shell command is worse than none.
+    let cramped = screen(&mut app, 60, 24);
+    let header = cramped.lines().next().expect("a header");
+    assert!(!header.contains("--resume"), "{header}");
+}
+
+/// What gives way for the command, and in what order. The title is the last
+/// thing on the header to earn its place: the results list already showed it,
+/// and the id is the half of the line you cannot reconstruct.
+#[test]
+fn the_reader_header_sheds_the_title_before_the_resume_command() {
+    let (_dir, mut app) = app();
+    // A word from the titled conversation only.
+    type_in(&mut app, "一次");
+    press(&mut app, KeyCode::Enter);
+    app.settle();
+
+    let wide = screen(&mut app, 160, 24);
+    let header = wide.lines().next().expect("a header");
+    assert!(
+        header.contains(TITLE),
+        "with room, the title stays:\n{header}"
+    );
+    assert!(header.contains(&format!("cd /code/demo && claude --resume {SESSION}")));
+
+    let narrow = screen(&mut app, 104, 24);
+    let header = narrow.lines().next().expect("a header");
+    assert!(
+        header.contains(&format!("claude --resume {SESSION}")),
+        "the id stays whole:\n{header}"
+    );
+    assert!(
+        !header.contains(TITLE),
+        "the title gave up its columns:\n{header}"
+    );
 }
 
 /// Bold alone does not catch the eye in a transcript that is already half code

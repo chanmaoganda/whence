@@ -6,7 +6,7 @@
 //! `src/source/codex/normalize.rs` before "fixing" anything.
 
 use whence::model::Harness;
-use whence::source;
+use whence::source::{self, Resumable};
 
 /// A rollout file exercising all five traps at once:
 ///
@@ -192,6 +192,22 @@ fn tool_output_is_matched_back_to_its_call() {
     assert_eq!(call.id, "call_abc");
     assert!(call.result.as_deref().unwrap().contains("Success."));
     assert!(!call.is_error);
+}
+
+/// The way back out of whence. Codex files its rollouts by date rather than by
+/// project, so the id alone would find the session — and reopen it against
+/// whatever directory you were standing in, which is not the conversation you
+/// were just reading.
+#[test]
+fn resumes_a_session_by_its_whole_id_in_its_own_project() {
+    let session = parse();
+    let command = source::resume(Harness::Codex, Resumable::from(&session))
+        .expect("resumable")
+        .pasteable();
+    assert_eq!(
+        command, "cd /code/stock/rtrade && codex resume 019f4eca-901b-7d91-9f65-cda91498aa04",
+        "the id in full, run where the session ran"
+    );
 }
 
 /// A corrupt line is counted, never fatal.

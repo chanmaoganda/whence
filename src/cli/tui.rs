@@ -13,9 +13,14 @@ pub fn run(index: SearchIndex, query: Query) -> Result<()> {
         bail!("`whence tui` needs a terminal — for a pipe or a script, use `whence search`");
     }
     // Whatever they were last looking at, spelled the way you would type it, so
-    // the shell is left holding a pointer into the corpus rather than nothing.
-    if let Some(target) = tui::run(App::new(index, query))? {
-        println!("whence show {target}");
+    // the shell is left holding a pointer into the corpus rather than nothing —
+    // and, under it, the way back into the conversation itself, which is the
+    // one thing the eight-character id on screen cannot give you.
+    if let Some(exit) = tui::run(App::new(index, query))? {
+        println!("whence show {}", exit.show);
+        if let Some(resume) = exit.resume {
+            println!("{resume}");
+        }
     }
     Ok(())
 }
