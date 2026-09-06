@@ -69,6 +69,10 @@ pub struct Hit {
     pub project: String,
     pub source: String,
     pub title: String,
+    /// The session's first prompt. What a conversation with no title is called,
+    /// and the one field on a hit that describes the *session* rather than the
+    /// passage — which is what a result has to carry to be grouped under one.
+    pub opening: String,
     pub turn: u64,
     pub timestamp: Option<DateTime<Utc>>,
     /// Only set on `edit` hits.
@@ -113,6 +117,18 @@ pub enum Found {
 impl Hit {
     /// Why this hit came back, when the excerpt does not already show it. `None`
     /// means the highlighted words in the excerpt are the whole story.
+    /// What to call the conversation this came from: the harness's own title
+    /// where there is one, and otherwise the first thing that was typed into
+    /// it. One or the other is what tells two sessions apart in a list.
+    pub fn name(&self) -> &str {
+        let title = self.title.trim();
+        if title.is_empty() {
+            self.opening.trim()
+        } else {
+            title
+        }
+    }
+
     pub fn why(&self) -> Option<String> {
         let words = || -> Vec<&str> { self.matched.iter().map(|m| m.word.as_str()).collect() };
         match self.found_in {
@@ -328,6 +344,7 @@ impl SearchIndex {
             project: stored_text(doc, f.project).unwrap_or_default(),
             source: stored_text(doc, f.source).unwrap_or_default(),
             title: stored_text(doc, f.title).unwrap_or_default(),
+            opening: stored_text(doc, f.opening).unwrap_or_default(),
             turn: doc.get_first(f.turn).and_then(|v| v.as_u64()).unwrap_or(0),
             timestamp: doc
                 .get_first(f.ts)

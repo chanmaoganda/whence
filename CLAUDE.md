@@ -65,6 +65,30 @@ harness adds one.
   keeps the number of denied or failed calls — that is the one you went looking
   for. Prompts are deliberately **not** rendered as markdown: a prompt is what
   was typed, and this is a tool for reading back what happened.
+- **The results list is a tree, not a list** (`tui::Tree`). A query that matches
+  a conversation at all usually matches it a dozen times — the same question
+  asked in slightly different words all week — and a dozen near-identical rows
+  push every *other* conversation off the screen, which is what the list was
+  for. So hits are gathered under the session they came from, one row per
+  conversation: what tells two apart (when, which project, what it was called)
+  plus its best passage and how many matches it holds. `→` opens it onto its
+  own matches, `←` shuts it, `⏎` reads whichever row you are on. All four
+  arrows are the tree's, always: sharing them with the caret meant `→` opened
+  a session while `←` only walked back through what had just been typed, one
+  key doing two things depending on a caret nobody was looking at. The query
+  box keeps the readline keys it already answered to — `^B`/`^F` move the
+  caret, `^A`/`^E`/Home/End its ends. Rank orders the sessions and the
+  searcher's
+  favourite is what a shut row shows, but *inside* a session the matches read
+  forwards, in turn order — a conversation is a sequence and reading it out of
+  order is how you lose the thread. Grouping never reorders the hits
+  themselves: rank is a fact about the whole corpus, and this is a view over it.
+- **A session has to be able to name itself.** Codex records no title at all and
+  Claude only sometimes, so the index stores each session's opening prompt
+  (`opening` — *stored*, never indexed, or every long session would be counted
+  once per document it produced). `Hit::name()` is the title where there is one
+  and that prompt otherwise; without it the row that answers "which
+  conversation is this?" is blank exactly where it matters.
 
 ## Format traps
 
@@ -163,10 +187,11 @@ ignored, and a corrupt line must never abort a file.
   shown: at the TUI's limit of 200 that was 47 ms of jieba per keystroke on a
   Chinese query against 4 ms. It also could never highlight a fuzzy or regex
   match, which report no terms — so this is one path where there were two.
-- `INDEX_FORMAT` covers the analyzer, not just the schema. Changing how text is
-  cut changes what the terms *are*, and an index full of the old ones answers
-  new queries with silence. Bump it and the stale index is rebuilt (0.4 s over
-  the whole corpus), never queried.
+- `INDEX_FORMAT` covers the analyzer and the stored fields, not just the
+  searchable schema. Changing how text is cut changes what the terms *are*, and
+  an index full of the old ones answers new queries with silence; a field the
+  code reads and the index never wrote is silence of the same kind. Bump it and
+  the stale index is rebuilt (0.3 s over the whole corpus), never queried.
 - The TUI is single-threaded on purpose: events are drained before each redraw,
   so a held-down key costs one search and one transcript read rather than one
   per repeat. Measured, that is 1–4 ms per keystroke against the real index

@@ -42,8 +42,15 @@ use tantivy::{DateTime as TantivyDate, Index, TantivyDocument, Term};
 
 /// Bumped whenever the schema or the analyzer changes; a stale index is
 /// rebuilt, not rejected. `2` is the script-aware tokenizer, which cuts Latin
-/// script differently from the jieba-everywhere `1` and keeps no punctuation.
-const INDEX_FORMAT: u32 = 2;
+/// script differently from the jieba-everywhere `1` and keeps no punctuation;
+/// `3` stores each session's opening prompt, which is how a result says which
+/// conversation it belongs to when the harness recorded no title.
+const INDEX_FORMAT: u32 = 3;
+
+/// Characters of the opening prompt kept on every document of a session. Long
+/// enough to tell two conversations apart, short enough that repeating it does
+/// not weigh on the store.
+const OPENING: usize = 120;
 
 /// Cap on indexed text per document. Long tool-shaped pastes add index weight
 /// without adding anything you would search for.
@@ -69,6 +76,9 @@ pub struct Fields {
     pub file: Field,
     pub tools: Field,
     pub title: Field,
+    /// The session's first prompt, stored and never indexed. See
+    /// [`session_docs`].
+    pub opening: Field,
     pub body: Field,
     pub turn: Field,
     pub ts: Field,
@@ -90,6 +100,7 @@ impl Fields {
             file: f("file")?,
             tools: f("tools")?,
             title: f("title")?,
+            opening: f("opening")?,
             body: f("body")?,
             turn: f("turn")?,
             ts: f("ts")?,
@@ -392,6 +403,11 @@ fn schema() -> Schema {
     b.add_text_field("file", tokenized(TOK_PATH));
     b.add_text_field("tools", tokenized(TOK_PATH));
     b.add_text_field("title", tokenized(TOK_TEXT));
+    // Stored, never indexed: it is how a result names the conversation it came
+    // from, not something you search. Indexing it would count every session's
+    // opening line once per document it produced and quietly reweight the
+    // corpus towards long sessions.
+    b.add_text_field("opening", STORED);
     b.add_text_field("body", tokenized(TOK_TEXT));
     b.add_u64_field("turn", STORED | INDEXED);
     b.add_date_field(
@@ -429,6 +445,14 @@ pub fn register_tokenizers(index: &Index) {
 pub fn session_docs(session: &Session, f: &Fields) -> Vec<TantivyDocument> {
     let source = session.source_path.to_string_lossy().into_owned();
     let title = session.title.clone().unwrap_or_default();
+    // Most sessions have no title: Codex records none at all, and Claude only
+    // where it happened to generate one. The first thing you typed is what you
+    // would have called the conversation anyway.
+    let opening = session
+        .prompts()
+        .find(|p| !p.text.trim().is_empty())
+        .map(|p| crate::model::first_line(&p.text, OPENING))
+        .unwrap_or_default();
 
     let base = |kind: &str, turn: usize, ts: Option<DateTime<Utc>>, body: &str| {
         let mut doc = TantivyDocument::new();
@@ -438,6 +462,7 @@ pub fn session_docs(session: &Session, f: &Fields) -> Vec<TantivyDocument> {
         doc.add_text(f.source, &source);
         doc.add_text(f.project, &session.project);
         doc.add_text(f.title, &title);
+        doc.add_text(f.opening, &opening);
         doc.add_u64(f.turn, turn as u64);
         doc.add_text(f.body, truncate(body, MAX_BODY));
         if let Some(ts) = ts {

@@ -15,10 +15,11 @@
 //!   the right edge, because a rewrapped shell command is no longer a command
 //!   you can copy and run.
 
-use super::app::{position_of, App, Laid, Reading, Show, View};
+use super::app::{position_of, App, Group, Laid, Reading, Row, Show, View};
 use crate::model::{first_line, short_id, when, Session, ToolCall, Turn};
 use crate::render::{self, Block as Md, Doc, Emphasis, Span as MdSpan};
 use crate::search::{Excerpt, Hit};
+use chrono::{DateTime, Utc};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -42,7 +43,8 @@ const SELECTED: Color = Color::Indexed(24);
 /// Below this the preview pane costs the results list more than it gives back,
 /// so the results get the whole width.
 const PREVIEW_FROM: u16 = 96;
-/// Lines of excerpt under each result.
+/// Lines of excerpt under one match. A shut session gets one — see
+/// [`session_item`].
 const EXCERPT_LINES: usize = 2;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -87,15 +89,19 @@ fn search_view(frame: &mut Frame, app: &mut App) {
 /// results does not look like anywhere you can type. The border is the cheapest
 /// way to say so, and it carries the filter chips on its own top edge.
 fn query_line(frame: &mut Frame, app: &App, area: Rect) {
+    // How many conversations, not only how many matches: a hundred hits from
+    // two sessions and a hundred from ninety are the same number and not
+    // remotely the same result.
+    let found = match (app.hits.len(), app.tree.len()) {
+        (0, _) => "no matches".to_string(),
+        (n, 1) => format!("{n} in 1 session"),
+        (n, s) => format!("{n} in {s} sessions"),
+    };
     let chips = format!(
         " {} · {} · {} ",
         app.harness_label(),
         app.kind.as_deref().unwrap_or("all kinds"),
-        match app.hits.len() {
-            0 => "no matches".to_string(),
-            1 => "1 match".to_string(),
-            n => format!("{n} matches"),
-        }
+        found
     );
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
@@ -145,7 +151,7 @@ fn query_line(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn results_list(frame: &mut Frame, app: &mut App, area: Rect) {
-    if app.hits.is_empty() {
+    if app.tree.is_empty() {
         let hint = match &app.error {
             Some(err) => Line::from(Span::styled(err.clone(), Style::new().fg(Color::Red))),
             None if app.query.is_empty() => {
@@ -165,7 +171,22 @@ fn results_list(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Two columns of padding, and two for the selection bar.
     let width = area.width.saturating_sub(4) as usize;
-    let items: Vec<ListItem> = app.hits.iter().map(|hit| hit_item(hit, width)).collect();
+    let items: Vec<ListItem> = app
+        .tree
+        .rows()
+        .iter()
+        .map(|row| match *row {
+            Row::Session(g) => {
+                let group = &app.tree.groups[g];
+                session_item(group, &app.hits, width)
+            }
+            Row::Hit(g, i) => {
+                let group = &app.tree.groups[g];
+                let hit = &app.hits[group.hits[i]];
+                hit_item(hit, i + 1 == group.hits.len(), width)
+            }
+        })
+        .collect();
     let list = List::new(items)
         .block(Block::new().padding(Padding::new(1, 1, 0, 0)))
         // Not `REVERSED`. Reversing swaps every cell's colours, so the dimmed
@@ -182,60 +203,154 @@ fn results_list(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_stateful_widget(list, area, &mut app.list);
 }
 
-/// One result: where it came from, then why it matched.
-fn hit_item(hit: &Hit, width: usize) -> ListItem<'static> {
-    let mut header = vec![
+/// One conversation: which one it was, and how much of the query it answered.
+///
+/// This is the row you choose between, so it carries what tells two sessions
+/// apart — when, which project, and what the conversation was called — and not
+/// what the matches inside it say. Shut, it still shows its best passage,
+/// because a row that cannot say why it is there is a row you have to open to
+/// find out.
+fn session_item(group: &Group, hits: &[Hit], width: usize) -> ListItem<'static> {
+    let best = &hits[group.hits[group.best]];
+    let newest = group.hits.iter().filter_map(|&at| hits[at].timestamp).max();
+    let count = match group.hits.len() {
+        1 => "1 match".to_string(),
+        n => format!("{n} matches"),
+    };
+
+    let arrow = if group.open { "▾ " } else { "▸ " };
+    let stamp = day(newest);
+    // Beside a preview the list is around fifty columns, which is not enough
+    // for every column at once — so the parts that only narrow it down go in
+    // while there is room and are left out when there is not, in that order.
+    // Nothing wraps: a header that spills onto a second line stops being a
+    // header.
+    let mut room = width.saturating_sub(arrow.width() + stamp.width() + count.width() + 1);
+    let mut fits = |text: String| -> Option<String> {
+        let want = text.width();
+        (want <= room).then(|| {
+            room -= want;
+            text
+        })
+    };
+    let project = fits(format!("  {}", project_name(&best.project)));
+    let id = fits(format!("  {}", short_id(&best.session)));
+    let harness = fits(format!("  {}", best.harness));
+
+    let mut head = vec![
+        Span::styled(arrow, Style::new().fg(Color::Cyan)),
         // Grey rather than dark grey: it has to stay legible on the selection
         // bar as well as recede on a plain row.
-        Span::styled(when(hit.timestamp), Style::new().fg(Color::Gray)),
-        Span::raw("  "),
-        Span::styled(format!("{:<6}", hit.harness), Style::new().dim()),
-        Span::raw(" "),
+        Span::styled(stamp, Style::new().fg(Color::Gray)),
+    ];
+    head.extend(harness.map(|h| Span::styled(h, Style::new().dim())));
+    head.extend(project.map(|p| Span::styled(p, Style::new().fg(Color::LightBlue))));
+    head.extend(id.map(|i| Span::styled(i, Style::new().dim())));
+    // The count goes to the right edge, so a column of them lines up and the
+    // conversation that answered the query six times is visible at a glance.
+    head.push(Span::raw(" ".repeat(room + 1)));
+    head.push(Span::styled(count, Style::new().fg(Color::DarkGray)));
+
+    let mut lines = vec![Line::from(head)];
+    // What the conversation was called is the answer to "which one is this?",
+    // so it gets a line of its own rather than a column that is the first thing
+    // squeezed out. Most sessions have no title and this is their opening
+    // prompt — either way it is the sentence you would recognise.
+    let name = first_line(best.name(), width);
+    if !name.is_empty() {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(clip(&name, width.saturating_sub(2)), Style::new()),
+        ]));
+    }
+    // Shut, the row still shows the passage that answered the query — a result
+    // that cannot say why it is there is one you have to open to find out. One
+    // line of it, because the point of shutting it was to see more sessions.
+    if !group.open {
+        lines.extend(excerpt_lines(&best.excerpt, width, "  ", 1));
+        lines.push(Line::default());
+    }
+    ListItem::new(lines)
+}
+
+/// A session's stamp, without the year. The list is a column of them a week
+/// apart and the year is four columns the project name needs more.
+fn day(ts: Option<DateTime<Utc>>) -> String {
+    match ts {
+        Some(t) => t.format("%m-%d %H:%M").to_string(),
+        None => " ".repeat(11),
+    }
+}
+
+/// One match inside a conversation: where in it, and what it says.
+///
+/// Drawn as a branch of the session above it. Everything the two rows would
+/// share — the harness, the project, the session id — is on that row already;
+/// what is left here is the part that differs between one match and the next.
+fn hit_item(hit: &Hit, last: bool, width: usize) -> ListItem<'static> {
+    let guide = if last { "└ " } else { "├ " };
+    let under = if last { "  " } else { "│ " };
+    let mut header = vec![
+        Span::styled(guide, Style::new().fg(Color::DarkGray)),
+        Span::styled(format!("#{:<4}", hit.turn), Style::new().fg(Color::Cyan)),
         Span::styled(
-            format!("{:<6}", hit.kind),
+            format!("{:<7}", hit.kind),
             Style::new().fg(kind_color(&hit.kind)),
         ),
-        Span::raw(" "),
-        Span::styled(
-            format!("{}#{}", short_id(&hit.session), hit.turn),
-            Style::new().fg(Color::Cyan),
-        ),
+        Span::styled(clock(hit.timestamp), Style::new().fg(Color::Gray)),
     ];
-    // Which project it was is worth a column of its own: the same question
-    // comes up in two repositories a week apart, and the title alone will not
-    // tell you which answer you are looking at.
-    let what = match hit.file.as_deref() {
-        Some(file) => first_line(file, 48),
-        None => first_line(&hit.title, 48),
-    };
-    header.push(Span::styled(
-        format!("  {}", project_name(&hit.project)),
-        Style::new().fg(Color::LightBlue),
-    ));
-    if !what.is_empty() {
-        header.push(Span::styled(format!("  {what}"), Style::new().dim()));
+    // An edit hit is about a file, and which file is the whole of it.
+    if let Some(file) = hit.file.as_deref() {
+        header.push(Span::styled(
+            format!("  {}", first_line(file, 48)),
+            Style::new().dim(),
+        ));
     }
 
     let mut lines = vec![Line::from(header)];
-    lines.extend(excerpt_lines(&hit.excerpt, width.saturating_sub(2)));
+    lines.extend(excerpt_lines(
+        &hit.excerpt,
+        width,
+        &format!("{under}  "),
+        EXCERPT_LINES,
+    ));
     if let Some(why) = hit.why() {
         lines.push(Line::from(vec![
-            Span::raw("  "),
+            Span::styled(under.to_string(), Style::new().fg(Color::DarkGray)),
             Span::styled(
-                format!("↳ {}", first_line(&why, width.saturating_sub(4))),
+                format!("  ↳ {}", first_line(&why, width.saturating_sub(6))),
                 Style::new().fg(Color::Yellow),
             ),
         ]));
     }
-    lines.push(Line::default());
+    // The blank belongs to the group, not the branch: it goes under the last
+    // one, so an open conversation reads as a block rather than as a stack of
+    // separate results.
+    if last {
+        lines.push(Line::default());
+    }
     ListItem::new(lines)
+}
+
+/// The time of day. A child row sits under a session row that already carries
+/// the date, and repeating it there costs the columns the excerpt needs.
+fn clock(ts: Option<DateTime<Utc>>) -> String {
+    match ts {
+        Some(t) => t.format("%H:%M").to_string(),
+        None => " ".repeat(5),
+    }
 }
 
 /// The matching passage, with the matched words picked out.
 ///
 /// Highlights arrive as byte ranges into the excerpt rather than as markup, so
 /// they survive being re-broken here at whatever width the pane turned out to be.
-fn excerpt_lines(excerpt: &Excerpt, width: usize) -> Vec<Line<'static>> {
+fn excerpt_lines(
+    excerpt: &Excerpt,
+    width: usize,
+    indent: &str,
+    lines: usize,
+) -> Vec<Line<'static>> {
     let mut chars: Vec<(char, Emphasis)> = Vec::with_capacity(excerpt.text.len());
     for (at, ch) in excerpt.text.char_indices() {
         let lit = excerpt.highlights.iter().any(|r| r.contains(&at));
@@ -252,15 +367,23 @@ fn excerpt_lines(excerpt: &Excerpt, width: usize) -> Vec<Line<'static>> {
         ));
     }
 
-    let mut broken = break_lines(&chars, width.max(8));
-    let clipped = broken.len() > EXCERPT_LINES;
-    broken.truncate(EXCERPT_LINES);
+    // The indent and the room for the ellipsis come out of the width here,
+    // rather than at each call site: an excerpt broken to the full width has
+    // nowhere to put the mark that says it was cut, and loses its last word to
+    // the right edge instead.
+    let inner = width.saturating_sub(indent.width() + 1);
+    let mut broken = break_lines(&chars, inner.max(8));
+    let clipped = broken.len() > lines;
+    broken.truncate(lines);
     let last = broken.len().saturating_sub(1);
     broken
         .into_iter()
         .enumerate()
         .map(|(i, run)| {
-            let mut spans = vec![Span::raw("  ")];
+            let mut spans = vec![Span::styled(
+                indent.to_string(),
+                Style::new().fg(Color::DarkGray),
+            )];
             spans.extend(runs_to_spans(&run, Style::new().dim(), marked));
             if clipped && i == last {
                 spans.push(Span::styled("…", Style::new().dim()));
@@ -1011,10 +1134,13 @@ fn status_line(app: &App) -> Line<'static> {
     }
     keys(&[
         ("↑↓", "move"),
+        ("←→", "fold"),
         ("⏎", "read"),
         ("⇥", "kind"),
         ("⇧⇥", "harness"),
-        ("^U", "clear"),
+        // Said out loud because the arrows no longer do it: the caret is on
+        // the readline keys, which is where the rest of this box already is.
+        ("^B^F", "caret"),
         ("esc", "quit"),
     ])
 }

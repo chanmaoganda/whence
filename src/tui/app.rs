@@ -48,7 +48,15 @@ pub struct App {
     /// `0` is every allowed harness; otherwise `allowed[harness - 1]`.
     pub harness: usize,
 
+    /// Every hit the search returned, best first. The list on screen is
+    /// [`Tree`] over these — the hits themselves stay flat, because a hit's
+    /// rank is a fact about the whole corpus and grouping must not reorder it.
     pub hits: Vec<Hit>,
+    /// The hits gathered under the session each came from. One session is one
+    /// row until you open it: forty near-identical matches inside a single
+    /// conversation used to be forty rows, and the next conversation was off
+    /// the bottom of the screen.
+    pub tree: Tree,
     pub relaxed: bool,
     /// The query as the analyzer cut it. What you typed is in `query`; this is
     /// what is actually being looked for, and they are not the same thing once
@@ -88,6 +96,7 @@ impl App {
             base: query,
             allowed,
             hits: Vec::new(),
+            tree: Tree::default(),
             relaxed: false,
             terms: Vec::new(),
             error: None,
@@ -128,8 +137,19 @@ impl App {
         }
     }
 
+    /// The row the cursor is on.
+    pub fn row(&self) -> Option<Row> {
+        self.list
+            .selected()
+            .and_then(|i| self.tree.rows().get(i))
+            .copied()
+    }
+
+    /// The hit the cursor is on. A session row stands for its best hit, so a
+    /// folded conversation still has a preview and still answers `whence show`.
     pub fn selected(&self) -> Option<&Hit> {
-        self.list.selected().and_then(|i| self.hits.get(i))
+        let at = self.tree.hit_at(self.row()?)?;
+        self.hits.get(at)
     }
 
     /// The `whence show` target for whatever is on screen.
@@ -218,6 +238,10 @@ impl App {
             }),
             KeyCode::Char('a') if ctrl => self.cursor = 0,
             KeyCode::Char('e') if ctrl => self.cursor = self.query.len(),
+            // The caret's own left and right. The arrows are the tree's, so the
+            // box keeps the readline keys it already answers to.
+            KeyCode::Char('b') if ctrl => self.cursor = prev_char(&self.query, self.cursor),
+            KeyCode::Char('f') if ctrl => self.cursor = next_char(&self.query, self.cursor),
             KeyCode::Char('n') if ctrl => self.move_selection(1),
             KeyCode::Char('p') if ctrl => self.move_selection(-1),
             KeyCode::Char(ch) if !ctrl => self.edit(|q, c| {
@@ -235,8 +259,12 @@ impl App {
                     q.remove(*c);
                 }
             }),
-            KeyCode::Left => self.cursor = prev_char(&self.query, self.cursor),
-            KeyCode::Right => self.cursor = next_char(&self.query, self.cursor),
+            // All four arrows drive the tree, always. Sharing them with the
+            // caret meant `→` opened a session and `←` only moved the caret
+            // back through what you had just typed — the same key doing two
+            // things depending on a caret you were not looking at.
+            KeyCode::Left => self.fold(),
+            KeyCode::Right => self.unfold(),
             KeyCode::Home => self.cursor = 0,
             KeyCode::End => self.cursor = self.query.len(),
             KeyCode::Esc => self.edit(|q, c| {
@@ -264,15 +292,63 @@ impl App {
     }
 
     fn move_selection(&mut self, by: isize) {
-        if self.hits.is_empty() {
+        let rows = self.tree.rows().len();
+        if rows == 0 {
             return;
         }
-        let last = self.hits.len() - 1;
         let at = self.list.selected().unwrap_or(0) as isize;
-        let next = at.saturating_add(by).clamp(0, last as isize) as usize;
-        if Some(next) != self.list.selected() {
-            self.list.select(Some(next));
+        let next = at.saturating_add(by).clamp(0, rows as isize - 1) as usize;
+        self.select_row(next);
+    }
+
+    /// Move to a row, and load its conversation if that is a different one.
+    fn select_row(&mut self, at: usize) {
+        let was = self.selected().map(|hit| hit.source.clone());
+        if Some(at) == self.list.selected() {
+            return;
+        }
+        self.list.select(Some(at));
+        let now = self.selected().map(|hit| hit.source.clone());
+        // Walking the matches inside one conversation is the common motion, and
+        // the transcript behind them does not change as you do it.
+        if was != now || self.preview.is_none() {
             self.preview_pending = true;
+        }
+    }
+
+    /// Open the session under the cursor, or step into it if it is already
+    /// open. The matches inside a conversation are the branch; the conversation
+    /// is the thing you are choosing between.
+    fn unfold(&mut self) {
+        let Some(Row::Session(g)) = self.row() else {
+            return;
+        };
+        if self.tree.groups[g].open {
+            self.move_selection(1);
+            return;
+        }
+        self.tree.set_open(g, true);
+        self.reselect(Row::Session(g));
+    }
+
+    /// Shut the session under the cursor. From inside one, come back out to it
+    /// first — the way every tree behaves, and the way back to the *other*
+    /// sessions once a long one has filled the screen.
+    fn fold(&mut self) {
+        match self.row() {
+            Some(Row::Hit(g, _)) => self.reselect(Row::Session(g)),
+            Some(Row::Session(g)) => {
+                self.tree.set_open(g, false);
+                self.reselect(Row::Session(g));
+            }
+            None => {}
+        }
+    }
+
+    /// Put the cursor back on a row after the visible rows have been rebuilt.
+    fn reselect(&mut self, row: Row) {
+        if let Some(at) = self.tree.position_of(row) {
+            self.select_row(at);
         }
     }
 
@@ -361,7 +437,9 @@ impl App {
                 self.error = Some(first_sentence(&err.to_string()));
             }
         }
-        self.list.select((!self.hits.is_empty()).then_some(0));
+        self.tree = Tree::of(&self.hits);
+        self.list
+            .select((!self.tree.rows().is_empty()).then_some(0));
         self.preview = None;
         self.preview_pending = true;
     }
@@ -401,6 +479,136 @@ impl App {
         self.cache.insert(0, (path.to_path_buf(), session.clone()));
         self.cache.truncate(CACHE);
         Ok(session)
+    }
+}
+
+/// The results, gathered under the conversation each came from.
+///
+/// A flat list of hits is the wrong shape for this corpus. One session asks the
+/// same question thirty times in slightly different words, so a query that
+/// matches it at all matches it thirty times — and thirty near-identical rows
+/// push every *other* conversation off the screen, which is the one thing the
+/// list was for. Grouping puts one row per session on screen and keeps the
+/// matches inside it one keystroke away.
+///
+/// The grouping never reorders: sessions appear in the order their best hit
+/// did, and the hits inside a session in the order the searcher ranked them.
+/// Rank is a fact about the whole corpus and this is a view over it.
+#[derive(Default)]
+pub struct Tree {
+    pub groups: Vec<Group>,
+    /// The rows actually on screen, rebuilt whenever a group opens or shuts.
+    rows: Vec<Row>,
+}
+
+/// Every hit from one session.
+pub struct Group {
+    pub session: String,
+    /// Indices into [`App::hits`], in the order the conversation happened.
+    /// Rank orders the sessions; inside one, a conversation reads forwards.
+    pub hits: Vec<usize>,
+    /// Which of `hits` the searcher liked best — the passage a shut session
+    /// shows, and the turn `⏎` opens it at. Not `hits[0]`: the best answer is
+    /// as often at the end of a conversation as at the start.
+    pub best: usize,
+    pub open: bool,
+}
+
+/// One line of the tree — or rather one *entry*, since both kinds draw as
+/// several lines. Carrying positions rather than references is what lets the
+/// hits stay in one flat vector that nothing has to clone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Row {
+    /// A conversation: the group's index.
+    Session(usize),
+    /// One match inside it: the group, then which of its hits.
+    Hit(usize, usize),
+}
+
+impl Tree {
+    pub fn of(hits: &[Hit]) -> Tree {
+        let mut groups: Vec<Group> = Vec::new();
+        for (at, hit) in hits.iter().enumerate() {
+            match groups.iter_mut().find(|g| g.session == hit.session) {
+                Some(group) => group.hits.push(at),
+                None => groups.push(Group {
+                    session: hit.session.clone(),
+                    hits: vec![at],
+                    best: 0,
+                    open: false,
+                }),
+            }
+        }
+        for group in &mut groups {
+            let best = group.hits[0];
+            // A stable sort, so two matches in one turn keep the order the
+            // searcher put them in.
+            group.hits.sort_by_key(|&at| hits[at].turn);
+            group.best = group.hits.iter().position(|&at| at == best).unwrap_or(0);
+        }
+        // A tree of one branch is a list: with nothing to choose between, the
+        // fold would only be something to open before you could read anything.
+        if groups.len() == 1 {
+            groups[0].open = true;
+        }
+        let mut tree = Tree {
+            groups,
+            rows: Vec::new(),
+        };
+        tree.relayout();
+        tree
+    }
+
+    pub fn rows(&self) -> &[Row] {
+        &self.rows
+    }
+
+    /// How many conversations the results came from — the number the flat list
+    /// could never say.
+    pub fn len(&self) -> usize {
+        self.groups.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.groups.is_empty()
+    }
+
+    pub fn set_open(&mut self, group: usize, open: bool) {
+        if let Some(g) = self.groups.get_mut(group) {
+            if g.open == open {
+                return;
+            }
+            g.open = open;
+            self.relayout();
+        }
+    }
+
+    /// The hit a row stands for. A shut session stands for its best one, so a
+    /// row that shows no excerpt still has a conversation behind it.
+    pub fn hit_at(&self, row: Row) -> Option<usize> {
+        let (group, at) = match row {
+            Row::Session(g) => {
+                let group = self.groups.get(g)?;
+                (group, group.best)
+            }
+            Row::Hit(g, i) => (self.groups.get(g)?, i),
+        };
+        group.hits.get(at).copied()
+    }
+
+    pub fn position_of(&self, row: Row) -> Option<usize> {
+        self.rows.iter().position(|&r| r == row)
+    }
+
+    fn relayout(&mut self) {
+        self.rows.clear();
+        for (g, group) in self.groups.iter().enumerate() {
+            self.rows.push(Row::Session(g));
+            if group.open {
+                self.rows
+                    .extend((0..group.hits.len()).map(|i| Row::Hit(g, i)));
+            }
+        }
     }
 }
 

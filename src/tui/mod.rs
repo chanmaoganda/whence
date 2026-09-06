@@ -1,7 +1,7 @@
 //! The full-screen browser: search as you type, read what you find.
 //!
 //! ```text
-//!   index ──▶ search ──▶ hits ──┬──▶ results list
+//!   index ──▶ search ──▶ hits ──▶ Tree ──┬──▶ results list
 //!                               │
 //!   source ──▶ Session ──▶ render::Doc ──▶ ui::wrap ──┴──▶ preview / reader
 //! ```
@@ -28,7 +28,7 @@
 pub mod app;
 pub mod ui;
 
-pub use app::{App, Show, View};
+pub use app::{App, Group, Row, Show, Tree, View};
 
 use anyhow::Result;
 use ratatui::crossterm::event::{self, Event};

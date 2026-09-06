@@ -15,7 +15,7 @@ use whence::model::Harness;
 use whence::render::renderer;
 use whence::search::Query;
 use whence::source::{Root, Transcript};
-use whence::tui::{ui, App, Show, View};
+use whence::tui::{ui, App, Row, Show, View};
 
 // ---- line breaking -------------------------------------------------------
 
@@ -134,6 +134,10 @@ fn a_tab_gets_a_width_before_anything_measures_it() {
 // ---- the application -----------------------------------------------------
 
 const SESSION: &str = "aaaaaaaa-1111-4111-8111-111111111111";
+/// A second conversation, so the results list has something to group. Most of
+/// this corpus asks the same question of the same repository for weeks, and a
+/// flat list of matches is unreadable exactly there.
+const OTHER: &str = "bbbbbbbb-2222-4222-8222-222222222222";
 
 fn transcript() -> Vec<String> {
     let head = format!(r#""sessionId":"{SESSION}","cwd":"/code/demo""#);
@@ -156,21 +160,48 @@ fn transcript() -> Vec<String> {
     ]
 }
 
-/// One indexed transcript, kept alive by the returned directory.
+/// The other conversation: a different project, and no `ai_title` at all —
+/// which is the usual case, and the case a grouped list has to name anyway.
+fn other_transcript() -> Vec<String> {
+    let head = format!(r#""sessionId":"{OTHER}","cwd":"/code/other""#);
+    vec![
+        format!(
+            r#"{{"type":"user",{head},"timestamp":"2026-08-09T09:00:00Z","message":{{"content":"换个会话说说索引的事"}}}}"#
+        ),
+        format!(
+            r#"{{"type":"assistant",{head},"requestId":"req_9","timestamp":"2026-08-09T09:00:10Z","message":{{"id":"msg_9","content":[{{"type":"text","text":"这是另一个会话的回复"}}],"usage":{{"output_tokens":10,"input_tokens":5}}}}}}"#
+        ),
+        format!(
+            r#"{{"type":"user",{head},"timestamp":"2026-08-09T09:05:00Z","message":{{"content":"顺便测试一下别的"}}}}"#
+        ),
+        format!(
+            r#"{{"type":"assistant",{head},"requestId":"req_10","timestamp":"2026-08-09T09:05:10Z","message":{{"id":"msg_10","content":[{{"type":"text","text":"好的，这里也提一句测试"}}],"usage":{{"output_tokens":10,"input_tokens":5}}}}}}"#
+        ),
+    ]
+}
+
+/// Two indexed transcripts, kept alive by the returned directory.
 fn corpus() -> (tempfile::TempDir, SearchIndex) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let project = dir.path().join("projects").join("-code-demo");
-    std::fs::create_dir_all(&project).expect("mkdir");
-    let file = project.join(format!("{SESSION}.jsonl"));
-    std::fs::write(&file, transcript().join("\n")).expect("write");
+    let write = |project: &str, session: &str, lines: Vec<String>| {
+        let at = dir.path().join("projects").join(project);
+        std::fs::create_dir_all(&at).expect("mkdir");
+        let file = at.join(format!("{session}.jsonl"));
+        std::fs::write(&file, lines.join("\n")).expect("write");
+        Transcript {
+            harness: Harness::Claude,
+            path: file,
+        }
+    };
+    let files = vec![
+        write("-code-demo", SESSION, transcript()),
+        write("-code-other", OTHER, other_transcript()),
+    ];
 
     let index = SearchIndex::open_or_create(&dir.path().join("index")).expect("index");
     index
         .build(
-            &[Transcript {
-                harness: Harness::Claude,
-                path: file,
-            }],
+            &files,
             &[Root {
                 harness: Harness::Claude,
                 path: dir.path().to_path_buf(),
@@ -196,6 +227,13 @@ fn app() -> (tempfile::TempDir, App) {
 
 fn press(app: &mut App, code: KeyCode) {
     app.handle(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+}
+
+fn ctrl(app: &mut App, ch: char) {
+    app.handle(Event::Key(KeyEvent::new(
+        KeyCode::Char(ch),
+        KeyModifiers::CONTROL,
+    )));
 }
 
 fn type_in(app: &mut App, text: &str) {
@@ -237,6 +275,146 @@ fn typing_narrows_and_enter_opens_the_conversation() {
     assert_eq!(app.view, View::Search);
 }
 
+// ---- the tree -----------------------------------------------------------
+
+/// The turn numbers of the matches shown under a session, in the order they
+/// are shown.
+fn branches(app: &App) -> Vec<u64> {
+    app.tree
+        .rows()
+        .iter()
+        .filter_map(|row| match row {
+            Row::Hit(..) => app.tree.hit_at(*row),
+            Row::Session(_) => None,
+        })
+        .map(|at| app.hits[at].turn)
+        .collect()
+}
+
+/// The whole point of the grouping: one conversation is one row, so the *next*
+/// conversation is one keystroke away rather than thirty.
+#[test]
+fn matches_are_grouped_under_the_session_they_came_from() {
+    let (_dir, mut app) = app();
+    type_in(&mut app, "测试");
+
+    assert!(app.hits.len() > 2, "several matches");
+    assert_eq!(app.tree.len(), 2, "from two conversations");
+    assert_eq!(
+        app.tree.rows().len(),
+        2,
+        "and two rows: a shut session shows none of its matches"
+    );
+
+    let first = app.selected().expect("a selection").session.clone();
+    press(&mut app, KeyCode::Down);
+    app.settle();
+    let second = app.selected().expect("a selection").session.clone();
+    assert_ne!(
+        first, second,
+        "one press moves to the other conversation, not to its next match"
+    );
+}
+
+/// A tree of one branch is a list. With nothing to choose between, a fold is
+/// only something to open before you can read anything.
+#[test]
+fn a_single_session_comes_open() {
+    let (_dir, mut app) = app();
+    type_in(&mut app, "tantivy");
+    assert_eq!(app.tree.len(), 1);
+    assert!(app.tree.groups[0].open);
+    assert!(app.tree.rows().len() > 1, "its matches are on screen");
+}
+
+#[test]
+fn right_opens_a_session_and_left_shuts_it_again() {
+    let (_dir, mut app) = app();
+    type_in(&mut app, "测试");
+    let shut = app.tree.rows().len();
+
+    press(&mut app, KeyCode::Right);
+    app.settle();
+    assert!(app.tree.groups[0].open);
+    assert!(app.tree.rows().len() > shut, "its matches are on screen");
+    assert!(
+        matches!(app.row(), Some(Row::Session(0))),
+        "opening a session does not move off it"
+    );
+
+    // From inside, the first press comes back out to the session — which is
+    // also the way back to the other sessions once a long one has filled the
+    // screen.
+    press(&mut app, KeyCode::Down);
+    app.settle();
+    assert!(matches!(app.row(), Some(Row::Hit(0, _))));
+    press(&mut app, KeyCode::Left);
+    app.settle();
+    assert!(matches!(app.row(), Some(Row::Session(0))));
+    assert!(app.tree.groups[0].open, "still open, you only stepped out");
+
+    press(&mut app, KeyCode::Left);
+    app.settle();
+    assert!(!app.tree.groups[0].open);
+    assert_eq!(app.tree.rows().len(), shut);
+}
+
+/// Rank orders the conversations; inside one, a conversation reads forwards.
+#[test]
+fn the_matches_inside_a_session_read_forwards() {
+    let (_dir, mut app) = app();
+    press(&mut app, KeyCode::Right);
+    app.settle();
+
+    let turns = branches(&app);
+    assert!(turns.len() > 1, "more than one match to order: {turns:?}");
+    assert!(
+        turns.windows(2).all(|w| w[0] <= w[1]),
+        "in the order the conversation happened: {turns:?}"
+    );
+}
+
+/// Most sessions have no title — Codex records none at all — so a row that
+/// showed only what the harness named it would be blank exactly where the
+/// question "which conversation is this?" is asked.
+#[test]
+fn a_session_with_no_title_is_named_by_its_first_prompt() {
+    let (_dir, mut app) = app();
+    type_in(&mut app, "别的");
+    let screen = screen(&mut app, 100, 24);
+    assert!(
+        screen.contains("换个会话说说索引的事"),
+        "the opening prompt names the conversation:\n{screen}"
+    );
+}
+
+/// The arrows are the tree's, always. Sharing them with the caret meant `→`
+/// opened a session while `←` only walked back through what you had just
+/// typed — one key doing two things depending on a caret you were not looking
+/// at. The caret keeps the readline keys the box already answers to.
+#[test]
+fn the_arrows_belong_to_the_tree_whatever_is_typed() {
+    let (_dir, mut app) = app();
+    type_in(&mut app, "测试");
+    let shut = app.tree.rows().len();
+
+    press(&mut app, KeyCode::Right);
+    app.settle();
+    assert!(app.tree.rows().len() > shut, "the session opened");
+    assert_eq!(app.cursor, 6, "and the caret did not move");
+
+    press(&mut app, KeyCode::Left);
+    app.settle();
+    assert_eq!(app.tree.rows().len(), shut, "and shut again");
+    assert_eq!(app.cursor, 6);
+
+    // Which is the caret's, and it still moves by characters.
+    ctrl(&mut app, 'b');
+    assert_eq!(app.cursor, 3);
+    ctrl(&mut app, 'f');
+    assert_eq!(app.cursor, 6);
+}
+
 #[test]
 fn a_half_typed_query_is_reported_not_fatal() {
     let (_dir, mut app) = app();
@@ -271,7 +449,7 @@ fn the_caret_moves_by_characters_not_bytes() {
     type_in(&mut app, "重构");
     assert_eq!(app.cursor, 6);
 
-    press(&mut app, KeyCode::Left);
+    ctrl(&mut app, 'b');
     assert_eq!(app.cursor, 3, "one character back, not one byte");
     press(&mut app, KeyCode::Backspace);
     app.settle();
@@ -338,7 +516,7 @@ fn the_search_screen_shows_the_query_the_hit_and_a_preview() {
     let screen = screen(&mut app, 120, 30);
 
     assert!(screen.contains("tantivy"), "the query is echoed:\n{screen}");
-    assert!(screen.contains("aaaaaaaa#"), "a hit names its session");
+    assert!(screen.contains("aaaaaaaa"), "a hit names its session");
     assert!(
         screen.contains("Read(src/normalize.rs)"),
         "the preview reads the transcript, tool calls and all:\n{screen}"
@@ -352,14 +530,16 @@ fn a_narrow_terminal_drops_the_preview() {
     let (_dir, mut app) = app();
     type_in(&mut app, "tantivy");
     let screen = screen(&mut app, 70, 20);
-    assert!(screen.contains("aaaaaaaa#"));
+    assert!(screen.contains("aaaaaaaa"));
     assert!(!screen.contains("Read(src/normalize.rs)"));
 }
 
 #[test]
 fn the_reader_opens_on_the_turn_the_hit_came_from() {
     let (_dir, mut app) = app();
-    type_in(&mut app, "测试");
+    // A word from one conversation only, so which hit is selected is not a
+    // question about how two equal scores happened to tie.
+    type_in(&mut app, "一次");
     press(&mut app, KeyCode::Enter);
     let screen = screen(&mut app, 100, 24);
 
