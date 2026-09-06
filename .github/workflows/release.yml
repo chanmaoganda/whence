@@ -1,0 +1,140 @@
+# The binaries a tag hands out.
+#
+# One job per platform, then one job that publishes: the assets go up together
+# at the end rather than as each build finishes, so a release is never half
+# published while a slower runner is still compiling.
+#
+# macOS is built twice and `lipo`d into one file — an Apple Silicon Mac and an
+# Intel one take the same download. Everything else is one target on its own
+# runner, built natively, because this tree needs a working C compiler for
+# `zstd-sys` and a native runner is the one place that is free.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  # For a tag pushed before this workflow existed, or a re-run after a failed
+  # upload: name the tag by hand.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The tag to build and publish, e.g. v0.2.0
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    name: ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing must not cancel the others: the log from every
+      # runner is what says whether the failure is the code or the toolchain.
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            artifact: macos-universal
+            targets: aarch64-apple-darwin x86_64-apple-darwin
+          - os: ubuntu-latest
+            artifact: linux-x86_64
+            targets: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            artifact: linux-x86_64-musl
+            targets: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            artifact: linux-aarch64
+            targets: aarch64-unknown-linux-gnu
+          - os: windows-latest
+            artifact: windows-x86_64
+            targets: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+
+      # `zstd-sys` compiles C, so the static build needs a C compiler that
+      # targets musl. Nothing else here does.
+      - name: Install the musl toolchain
+        if: contains(matrix.artifact, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        shell: bash
+        run: |
+          for target in ${{ matrix.targets }}; do
+            rustup target add "$target"
+            cargo build --release --locked --target "$target"
+          done
+
+      - name: Package
+        shell: bash
+        run: |
+          name="whence-$TAG-${{ matrix.artifact }}"
+          bin=whence
+          if [ "$RUNNER_OS" = Windows ]; then
+            bin=whence.exe
+          fi
+          targets=(${{ matrix.targets }})
+
+          mkdir -p "stage/$name" dist
+          if [ "${#targets[@]}" -gt 1 ]; then
+            built=()
+            for target in "${targets[@]}"; do built+=("target/$target/release/$bin"); done
+            lipo -create -output "stage/$name/$bin" "${built[@]}"
+            lipo -info "stage/$name/$bin"
+          else
+            cp "target/${targets[0]}/release/$bin" "stage/$name/$bin"
+          fi
+          cp README.md LICENSE-MIT LICENSE-APACHE "stage/$name/"
+
+          if [ "$RUNNER_OS" = Windows ]; then
+            (cd stage && 7z a "../dist/$name.zip" "$name")
+          else
+            tar -czf "dist/$name.tar.gz" -C stage "$name"
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      # Creating the release and uploading to it. Everything else stays read.
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+          # The annotated tag's own message is the release notes, and a shallow
+          # clone does not carry it.
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: cd dist && sha256sum * | tee SHA256SUMS
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --verify-tag --notes-from-tag --title "whence ${TAG#v}"
+          fi
