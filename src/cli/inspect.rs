@@ -184,6 +184,17 @@ fn naive_output_tokens(harness: whence::model::Harness, path: &Path) -> Result<u
                 .pointer("/payload/info/total_token_usage/output_tokens")
                 .and_then(|t| t.as_u64())
                 .unwrap_or(0),
+            // omp's per-response counts are honest; the mistake it invites is
+            // treating `reasoningTokens` as a bucket beside `output` when it is
+            // already counted inside it.
+            Harness::Omp => {
+                let at = |key: &str| {
+                    v.pointer(&format!("/message/usage/{key}"))
+                        .and_then(|t| t.as_u64())
+                        .unwrap_or(0)
+                };
+                at("output") + at("reasoningTokens")
+            }
         };
     }
     Ok(total)

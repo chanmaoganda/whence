@@ -3,9 +3,10 @@
 //!
 //! Every agent writes JSONL, and there the similarity ends. Claude Code writes
 //! one line per content block with a repeated `usage` payload; Codex writes an
-//! event log where token counts accumulate. Both need real work to read
-//! correctly, and neither's mistakes should be visible to anything above this
-//! module.
+//! event log where token counts accumulate; omp writes one line per response
+//! and nests its reasoning tokens inside the output count. Each needs real work
+//! to read correctly, and none of their mistakes should be visible to anything
+//! above this module.
 //!
 //! A [`Source`] turns files into [`Session`]s. Adding a harness means adding a
 //! directory here, a [`Harness`] variant, and an entry in [`ALL`] — nothing
@@ -26,6 +27,7 @@ use std::path::{Path, PathBuf};
 
 pub mod claude;
 pub mod codex;
+pub mod omp;
 
 /// How a file parsed. A non-zero `parse_errors` means a format change or a bug,
 /// never a reason to have dropped the file.
@@ -156,9 +158,10 @@ pub trait Source: Send + Sync {
 
 static CLAUDE: claude::ClaudeCode = claude::ClaudeCode;
 static CODEX: codex::Codex = codex::Codex;
+static OMP: omp::Omp = omp::Omp;
 
 /// Every adapter, in [`Harness::ALL`] order.
-pub const ALL: [&'static dyn Source; 2] = [&CLAUDE, &CODEX];
+pub const ALL: [&'static dyn Source; 3] = [&CLAUDE, &CODEX, &OMP];
 
 pub fn get(harness: Harness) -> &'static dyn Source {
     ALL.into_iter()
@@ -331,10 +334,24 @@ mod tests {
         let codex = vec![
             r#"{"timestamp":"2026-07-11T01:28:09.083Z","type":"session_meta","payload":{"session_id":"s","cwd":"/x"}}"#.to_string(),
         ];
-        assert!(get(Harness::Claude).sniff(&claude));
-        assert!(!get(Harness::Claude).sniff(&codex));
-        assert!(get(Harness::Codex).sniff(&codex));
-        assert!(!get(Harness::Codex).sniff(&claude));
+        let omp = vec![
+            r#"{"type":"session","version":3,"id":"s","timestamp":"2026-09-10T15:50:01.957Z","cwd":"/x","title":"t"}"#.to_string(),
+        ];
+        let samples = [
+            (Harness::Claude, &claude),
+            (Harness::Codex, &codex),
+            (Harness::Omp, &omp),
+        ];
+        for (harness, lines) in samples {
+            for source in ALL {
+                assert_eq!(
+                    source.sniff(lines),
+                    source.harness() == harness,
+                    "{} on a {harness} transcript",
+                    source.harness()
+                );
+            }
+        }
     }
 
     #[test]

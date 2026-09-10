@@ -1,7 +1,7 @@
 # whence
 
 A local search engine and time machine for coding-agent transcripts. Reads what
-Claude Code and Codex leave on disk and makes it queryable. Open source, fully
+Claude Code, Codex and omp leave on disk and makes it queryable. Open source, fully
 local, no telemetry — never add a network call that ships transcript content
 anywhere.
 
@@ -11,11 +11,11 @@ session changed this file, and why.
 ## Architecture
 
 ```
-source/{claude,codex} ──▶ model ──┬──▶ tokenize ──▶ index + search (tantivy)
- per-harness parsing              ├──▶ insights (corpus aggregates)
-                                  ├──▶ render ──▶ CLI + ratatui TUI
-                                  ├──▶ MCP server (redacted)
-                                  └──▶ SQLite  (planned)
+source/{claude,codex,omp} ──▶ model ──┬──▶ tokenize ──▶ index + search (tantivy)
+ per-harness parsing                  ├──▶ insights (corpus aggregates)
+                                      ├──▶ render ──▶ CLI + ratatui TUI
+                                      ├──▶ MCP server (redacted)
+                                      └──▶ SQLite  (planned)
 ```
 
 One rule holds the design together: **`src/source/` is the only place that knows
@@ -55,7 +55,8 @@ harness adds one.
   index, so reading a session back never depends on the index being current.
 - **`Source::resume` is the one method that hands a transcript back.** The id
   every surface prints is eight characters, which names a session to whence and
-  to nothing else; `claude --resume` and `codex resume` want the whole uuid, and
+  to nothing else; `claude --resume`, `codex resume` and `omp --resume` want the
+  whole uuid, and
   want it in the directory the session ran in, because that is how both
   harnesses find one. `whence show` prints the command; the reader carries it on
   the right of its header, because reading is where you decide to go back; and
@@ -155,6 +156,57 @@ them.
 6. **Reasoning is encrypted.** All 89 reasoning items in the corpus carry an
    `encrypted_content` blob, an empty `summary` and no `content`.
 
+### omp (Oh My Pi) — `tests/omp.rs`
+
+The best-behaved of the three: usage is per-response and honest, one record
+really is one response, and reasoning is written out in the clear. Four things
+still catch a naive reader.
+
+1. **`reasoningTokens` is counted *inside* `output`, not beside it.** Every
+   response satisfies `totalTokens == input + output + cacheRead`, with the
+   reasoning figure a subset of `output`. Adding the two reads 33,024 output
+   tokens on the reference session against a true 20,713 — **59%** too high.
+   The mirror image of the Claude trap: there the sibling buckets are real and
+   must be summed, here the nested one must not be.
+2. **Every tool call is recorded twice.** The assistant message carries a
+   `toolCall` block and a separate `custom` record of `customType`
+   `tool_execution_start` repeats it — same `toolCallId`, same arguments — as
+   the call begins to run. Both are 68 over 68 distinct ids on the reference
+   session. Read the message blocks; the `custom` records are confirmation.
+3. **`message.role` has three values and the third is not a person.**
+   `toolResult` is a role of its own rather than a block inside a user turn, so
+   a reader that splits on user-versus-assistant files tool output under
+   whichever it picked. Separately, `custom_message` carries
+   `attribution: "agent"` — a harness notice (a finished background job) that
+   reads exactly like a turn. `attribution` is the field that tells a real
+   prompt from an injected one, and it is trusted when absent so that a release
+   which stops writing it cannot silently empty every session of its prompts.
+4. **There are two clocks.** The envelope's `timestamp` is RFC 3339; the
+   `timestamp` inside a message is epoch **milliseconds**. Read the latter as
+   seconds and the conversation lands in the year 58699.
+
+Also worth knowing, none of them traps:
+
+- **Reasoning arrives in the clear**, unlike either other harness. `Step::thinking`
+  was a field nothing ever filled; omp fills it, which is what makes the index's
+  `think` documents reachable for the first time.
+- **The title is written twice and the header is stale.** Line 1 is a padded
+  `title` record rewritten in place, and every retitling also appends a
+  `title_change`. Last one in file order wins.
+- **A response names its model bare and its provider separately**
+  (`deepseek-v4-flash` + `deepseek`) while a `model_change` names them together
+  (`deepseek/deepseek-v4-flash`). The adapter spells both `provider/model`, or
+  one session reads as two models. Only the `default` model slot answers the
+  conversation; `smol`, `slow` and `plan` are other slots.
+- **The transcript never names omp's own version** — `session.version` is the
+  format version — so `agent_version` stays `None`.
+- **An edit is recorded only by its tool result.** There is no equivalent of
+  Claude's `file-history-delta`: the `write`/`edit`/`notebook` result carries
+  `details.resolvedPath`, and attribution runs back through the `toolCallId` to
+  the response that made the call.
+- Beside each transcript omp may keep a directory of the same name holding
+  per-tool output logs (`8.bash.log`); those are not transcripts.
+
 ### Cross-harness
 
 **The harnesses disagree about what an input token is.** Codex satisfies
@@ -163,15 +215,17 @@ them.
 bucket outside `input_tokens`. `model::UsageTotals` uses Claude's arrangement —
 disjoint buckets — and the Codex adapter subtracts the cached portion back out.
 Skip that and a Codex session's input tokens read as several times a comparable
-Claude one's.
+Claude one's. omp already agrees with Claude here (`totalTokens == input +
+output + cacheRead`), so its adapter subtracts nothing; what it must not do is
+add `reasoningTokens`, which is already inside `output`.
 
 Parsing stays permissive everywhere: unknown record types and fields are
 ignored, and a corrupt line must never abort a file.
 
 ## Conventions
 
-- Verify against the real corpora, not just fixtures. `whence stats` over both
-  harnesses (974 sessions, ~800 MB) should stay near 0.2s.
+- Verify against the real corpora, not just fixtures. `whence stats` over all
+  three harnesses (~800 sessions, ~590 MB) should stay near 0.2s.
 - `whence sources` shows which harnesses were found; use it first when something
   seems missing.
 - Fuzzy matching dispatches on script and the two halves are not interchangeable:
@@ -227,7 +281,7 @@ ignored, and a corrupt line must never abort a file.
 
 ## Status
 
-Done: the `Source` trait and registry, the Claude and Codex adapters, the
+Done: the `Source` trait and registry, the Claude, Codex and omp adapters, the
 markdown renderer, the index and searcher (whose schema carries a `harness` field,
 so results say where a hit came from and `--harness` filters work), and
 `whence sources | inspect | stats | index | search | file | show | completions |

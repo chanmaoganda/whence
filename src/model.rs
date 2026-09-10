@@ -21,12 +21,13 @@ use std::str::FromStr;
 pub enum Harness {
     Claude,
     Codex,
+    Omp,
 }
 
 impl Harness {
     /// Every harness, in display order. Adding a variant here and a module
     /// under [`crate::source`] is the whole cost of supporting a new agent.
-    pub const ALL: [Harness; 2] = [Harness::Claude, Harness::Codex];
+    pub const ALL: [Harness; 3] = [Harness::Claude, Harness::Codex, Harness::Omp];
 
     /// The lowercase token used on the command line, in the index and in
     /// `--harness` filters. Stable: it is written into the index.
@@ -34,6 +35,7 @@ impl Harness {
         match self {
             Harness::Claude => "claude",
             Harness::Codex => "codex",
+            Harness::Omp => "omp",
         }
     }
 }
@@ -115,9 +117,10 @@ pub struct Prompt {
 /// One model response, folded back together from the several transcript lines
 /// that carry it.
 ///
-/// Both supported harnesses split a single response across many lines, and both
-/// repeat or accumulate token counts while doing so — see each adapter's module
-/// docs. Folding is where the token arithmetic is either right or badly wrong.
+/// Claude Code and Codex both split a response across many lines and both repeat
+/// or accumulate token counts while doing so; omp writes one line per response
+/// and counts it once. See each adapter's module docs — folding is where the
+/// token arithmetic is either right or badly wrong.
 #[derive(Debug, Clone)]
 pub struct Step {
     /// Whatever the harness uses to identify one response: Claude's
@@ -131,8 +134,9 @@ pub struct Step {
     pub model: Option<String>,
     pub timestamp: Option<DateTime<Utc>>,
     pub text: String,
-    /// Reasoning text, where the transcript kept any in the clear. Usually
-    /// empty: both harnesses encrypt it.
+    /// Reasoning text, where the transcript kept any in the clear. Empty for
+    /// Claude Code and Codex, which both encrypt it; omp writes it out, and is
+    /// why this field carries anything at all.
     pub thinking: String,
     pub tool_calls: Vec<ToolCall>,
     /// Counted exactly once per response.
